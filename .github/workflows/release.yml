@@ -79,10 +79,14 @@ jobs:
             - macOS App（Apple Silicon）：wxemoticon-app-macos-arm64.dmg
             - macOS App（Intel）：wxemoticon-app-macos-x64.dmg
             - CLI：wxemoticon（aarch64 / x86_64）
-            - 安装脚本：install-wxemoticon.sh
+            - Windows CLI：wxemoticon-x86_64-windows.zip
+            - 安装脚本：install-wxemoticon.sh / install-wxemoticon.ps1
 
-            CLI 安装：
+            CLI 安装（macOS / Linux）：
             curl -fsSL https://raw.githubusercontent.com/liusheng22/export-wechat-emoji/main/scripts/install-wxemoticon.sh | bash
+
+            CLI 安装（Windows，PowerShell）：
+            irm https://raw.githubusercontent.com/liusheng22/export-wechat-emoji/main/scripts/install-wxemoticon.ps1 | iex
 
             CLI 常用命令：
             - wxemoticon key
@@ -90,7 +94,7 @@ jobs:
             - wxemoticon export
             - wxemoticon update
 
-            Homebrew（可选）：
+            Homebrew（可选，仅 macOS）：
             - brew tap liusheng22/wxemoticon
             - brew install wxemoticon
           releaseDraft: false
@@ -204,6 +208,43 @@ jobs:
           git add Formula/wxemoticon.rb
           git commit -m "wxemoticon ${TAG}"
           git push origin HEAD
+
+  publish-cli-windows:
+    needs: publish-tauri
+    permissions:
+      contents: write
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # 获取完整的 git 历史，包括 tag 信息
+
+      - name: install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      # 静态链接 CRT：产物不依赖 VC++ 运行库
+      - name: build wxemoticon cli (static crt)
+        shell: bash
+        env:
+          RUSTFLAGS: -C target-feature=+crt-static
+        run: cargo build --manifest-path cli/Cargo.toml --release --target x86_64-pc-windows-msvc
+
+      - name: package cli assets
+        shell: pwsh
+        run: |
+          Compress-Archive -Path cli/target/x86_64-pc-windows-msvc/release/wxemoticon.exe -DestinationPath wxemoticon-x86_64-windows.zip -Force
+          $hash = (Get-FileHash wxemoticon-x86_64-windows.zip -Algorithm SHA256).Hash.ToLower()
+          "$hash  wxemoticon-x86_64-windows.zip" | Out-File -Encoding ascii wxemoticon-SHA256SUMS-windows.txt
+
+      - name: upload wxemoticon windows cli assets
+        uses: softprops/action-gh-release@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          files: |
+            wxemoticon-x86_64-windows.zip
+            wxemoticon-SHA256SUMS-windows.txt
+            scripts/install-wxemoticon.ps1
 
   cleanup-release-default-assets:
     needs: publish-tauri

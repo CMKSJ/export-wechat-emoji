@@ -4,7 +4,7 @@ use cbc::cipher::block_padding::NoPadding;
 use cbc::cipher::{BlockDecryptMut, KeyIvInit};
 use clap::{Parser, Subcommand};
 use dialoguer::theme::ColorfulTheme;
-use dialoguer::{Confirm, Input, Select};
+use dialoguer::{Confirm, Input};
 use hmac::{Hmac, Mac};
 use indicatif::{ProgressBar, ProgressStyle};
 use pbkdf2::pbkdf2_hmac_array;
@@ -24,6 +24,8 @@ use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 #[cfg(target_os = "macos")]
 use std::process::{Command, Stdio};
+#[cfg(target_os = "windows")]
+use std::process::Command;
 use std::time::{Duration, SystemTime};
 use tempfile::NamedTempFile;
 use tokio::time::Instant;
@@ -31,12 +33,19 @@ use url::Url;
 
 #[cfg(target_os = "linux")]
 mod linux;
+#[cfg(target_os = "windows")]
+mod windows;
+#[cfg(any(target_os = "linux", target_os = "windows"))]
+mod keyscan;
 
 #[cfg(target_os = "macos")]
 const DEFAULT_WECHAT_PATH: &str = "/Applications/WeChat.app";
 #[cfg(target_os = "linux")]
 const DEFAULT_WECHAT_PATH: &str = "/opt/wechat/wechat";
-#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+// Windows 下留空表示自动检测 Weixin.exe / WeChat.exe。
+#[cfg(target_os = "windows")]
+const DEFAULT_WECHAT_PATH: &str = "";
+#[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
 const DEFAULT_WECHAT_PATH: &str = "wechat";
 
 // The key dumper dylib is built by build.rs and embedded here so the CLI stays a single executable.
@@ -48,10 +57,10 @@ static WECHAT_KEY_DUMPER_DYLIB: &[u8] = include_bytes!(env!("WXEMOTICON_KEY_DUMP
     name = "wxemoticon",
     author,
     version,
-    about = "macOS/Linux 微信表情包工具：抓取 db key / 导出 URL / 导出表情包图片"
+    about = "微信表情包工具（macOS/Linux/Windows）：抓取 db key / 导出 URL / 导出表情包图片"
 )]
 struct Cli {
-    /// 微信程序路径（Linux 默认 /opt/wechat/wechat；macOS 默认 /Applications/WeChat.app）
+    /// 微信程序路径（Windows 默认自动检测 Weixin.exe；Linux 默认 /opt/wechat/wechat；macOS 默认 /Applications/WeChat.app）
     #[arg(
         long = "wechat-bin",
         visible_alias = "wechat-app",
@@ -297,9 +306,38 @@ fn term_stderr() -> dialoguer::console::Term {
     dialoguer::console::Term::stderr()
 }
 
+/// 序号选择：打印选项并读取序号（回车取默认）。
+/// 不用 dialoguer 的 Select：其在部分 Windows 终端重绘中文列表时可能丢行。
+fn choose_numbered(prompt: &str, items: &[&str], default_index: usize) -> anyhow::Result<usize> {
+    loop {
+        for (i, item) in items.iter().enumerate() {
+            eprintln!("  {}) {}", i + 1, item);
+        }
+        let input: String = Input::with_theme(&ColorfulTheme::default())
+            .with_prompt(prompt)
+            .default((default_index + 1).to_string())
+            .interact_text_on(&term_stderr())
+            .context("读取选择失败")?;
+        match input.trim().parse::<usize>() {
+            Ok(n) if (1..=items.len()).contains(&n) => return Ok(n - 1),
+            _ => eprintln!("无效序号，请输入 1-{} 或直接回车", items.len()),
+        }
+    }
+}
+
 fn home_dir() -> anyhow::Result<PathBuf> {
-    let home = std::env::var("HOME").map_err(|_| anyhow!("无法获取 HOME 环境变量"))?;
-    Ok(PathBuf::from(home))
+    #[cfg(target_os = "windows")]
+    {
+        std::env::var("USERPROFILE")
+            .map(PathBuf::from)
+            .map_err(|_| anyhow!("无法获取 USERPROFILE 环境变量"))
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        std::env::var("HOME")
+            .map(PathBuf::from)
+            .map_err(|_| anyhow!("无法获取 HOME 环境变量"))
+    }
 }
 
 fn default_out_dir() -> anyhow::Result<PathBuf> {
@@ -308,7 +346,15 @@ fn default_out_dir() -> anyhow::Result<PathBuf> {
         return Ok(home_dir()?
             .join("Library/Containers/com.tencent.xinWeChat/Data/Documents/export-wechat-emoji"));
     }
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(target_os = "windows")]
+    {
+        let base = match std::env::var("LOCALAPPDATA") {
+            Ok(value) => PathBuf::from(value),
+            Err(_) => home_dir()?.join("AppData/Local"),
+        };
+        return Ok(base.join("wxemoticon"));
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
     {
         Ok(home_dir()?.join(".local/share/wxemoticon"))
     }
@@ -391,6 +437,11 @@ fn xwechat_files_dir(explicit: Option<&str>) -> anyhow::Result<PathBuf> {
         let explicit = explicit.map(resolve_user_path).transpose()?;
         linux::discover_data_root(&home_dir()?, explicit.as_deref())
     }
+    #[cfg(target_os = "windows")]
+    {
+        let explicit = explicit.map(resolve_user_path).transpose()?;
+        windows::discover_data_root(&home_dir()?, explicit.as_deref())
+    }
     #[cfg(target_os = "macos")]
     {
         if let Some(path) = explicit {
@@ -399,15 +450,38 @@ fn xwechat_files_dir(explicit: Option<&str>) -> anyhow::Result<PathBuf> {
         return Ok(home_dir()?
             .join("Library/Containers/com.tencent.xinWeChat/Data/Documents/xwechat_files"));
     }
-    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
     {
         let _ = explicit;
         Err(anyhow!("当前操作系统不受支持"))
     }
 }
 
+#[cfg_attr(target_os = "windows", allow(dead_code))]
 fn downloads_dir() -> anyhow::Result<PathBuf> {
     Ok(home_dir()?.join("Downloads"))
+}
+
+/// 默认导出根目录。
+/// Windows 下为 wxemoticon.exe 所在目录（导出文件夹与 exe 同级，便于绿色免安装使用）；
+/// 其他平台保持 ~/Downloads。
+fn default_export_base_dir() -> anyhow::Result<PathBuf> {
+    #[cfg(target_os = "windows")]
+    {
+        let exe = std::env::current_exe().context("获取当前程序路径失败")?;
+        Ok(exe_dir(&exe))
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        downloads_dir()
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn exe_dir(exe: &Path) -> PathBuf {
+    exe.parent()
+        .map(|p| p.to_path_buf())
+        .unwrap_or_else(|| PathBuf::from("."))
 }
 
 #[cfg(target_os = "macos")]
@@ -453,6 +527,35 @@ fn open_dir(path: &Path) -> anyhow::Result<()> {
     Ok(())
 }
 
+#[cfg(target_os = "windows")]
+fn open_reveal(path: &Path) -> anyhow::Result<()> {
+    // explorer 常在成功时也返回非零退出码，这里忽略退出码。
+    let _ = Command::new("explorer.exe")
+        .arg(format!("/select,{}", path.display()))
+        .status()
+        .context("执行 explorer 失败")?;
+    Ok(())
+}
+
+#[cfg(target_os = "windows")]
+fn open_dir(path: &Path) -> anyhow::Result<()> {
+    let _ = Command::new("explorer.exe")
+        .arg(path)
+        .status()
+        .context("执行 explorer 失败")?;
+    Ok(())
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+fn open_reveal(_path: &Path) -> anyhow::Result<()> {
+    Err(anyhow!("当前操作系统不受支持"))
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+fn open_dir(_path: &Path) -> anyhow::Result<()> {
+    Err(anyhow!("当前操作系统不受支持"))
+}
+
 #[cfg(target_os = "macos")]
 fn wechat_is_running(wechat_app: &Path) -> bool {
     // Don't use `ps | grep` / `pgrep -f` because they may match themselves and cause false positives.
@@ -481,6 +584,7 @@ fn wechat_is_running(wechat_app: &Path) -> bool {
     false
 }
 
+#[cfg_attr(not(any(target_os = "macos", target_os = "linux")), allow(dead_code))]
 fn prompt_enter_to_continue(no_interactive: bool, msg: &str) -> anyhow::Result<()> {
     eprintln!("{msg}");
     if no_interactive {
@@ -545,7 +649,9 @@ fn wait_for_wechat_exit(_wechat_app: &Path, no_interactive: bool) -> anyhow::Res
 }
 
 #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+#[allow(dead_code)]
 fn wait_for_wechat_exit(_wechat_app: &Path, _no_interactive: bool) -> anyhow::Result<()> {
+    // Windows 抓 key 优先扫描正在运行的微信，无需先退出。
     Err(anyhow!("当前操作系统不受支持"))
 }
 
@@ -727,12 +833,7 @@ fn select_account(
     }
 
     let items: Vec<&str> = accounts.iter().map(|a| a.wxid.as_str()).collect();
-    let idx = Select::with_theme(&ColorfulTheme::default())
-        .with_prompt("请输入序号")
-        .items(&items)
-        .default(0)
-        .interact_on(&term_stderr())
-        .context("读取选择失败")?;
+    let idx = choose_numbered("请输入账号序号", &items, 0)?;
     Ok(accounts[idx].clone())
 }
 
@@ -972,7 +1073,14 @@ fn get_or_dump_key(
         write_private_file(key_file, format!("{key}\n").as_bytes())?;
         Ok(key)
     }
-    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    #[cfg(target_os = "windows")]
+    {
+        let _ = (target_wxid, no_interactive);
+        let key = windows::dump_db_key(wechat_app, emoticon_db, log_file, timeout)?;
+        write_private_file(key_file, format!("{key}\n").as_bytes())?;
+        Ok(key)
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
     {
         let _ = (
             target_wxid,
@@ -1011,21 +1119,121 @@ impl std::fmt::Display for DecryptError {
     }
 }
 
+/// 解密单页（4096 字节）的 SQLCipher 页面镜像。
+/// `page_no` 从 1 开始；第 1 页开头 16 字节是 salt，明文里对应 "SQLite format 3\0"。
+fn decrypt_page_image(
+    page: &[u8],
+    page_no: u32,
+    key: &[u8; 32],
+    mac_key: &[u8; 32],
+) -> Result<Vec<u8>, DecryptError> {
+    const IV_SIZE: usize = 16;
+    const HMAC_SHA512_SIZE: usize = 64;
+    const AES_BLOCK_SIZE: usize = 16;
+    const PAGE_SIZE: usize = 4096;
+    const SALT_SIZE: usize = 16;
+
+    if page.len() != PAGE_SIZE {
+        return Err(DecryptError::Invalid("invalid page size".to_string()));
+    }
+
+    // SQLCipher reserved bytes per page are IV + HMAC, aligned to AES block size.
+    let mut reserve = IV_SIZE + HMAC_SHA512_SIZE;
+    if !reserve.is_multiple_of(AES_BLOCK_SIZE) {
+        reserve = ((reserve / AES_BLOCK_SIZE) + 1) * AES_BLOCK_SIZE;
+    }
+
+    let offset = if page_no == 1 { SALT_SIZE } else { 0 };
+    let iv_start = PAGE_SIZE - reserve;
+    let iv_end = iv_start + IV_SIZE;
+    let hmac_start = iv_end;
+    let hmac_end = hmac_start + HMAC_SHA512_SIZE;
+
+    let mut mac = Hmac::<Sha512>::new_from_slice(mac_key)
+        .map_err(|e| DecryptError::Crypto(format!("hmac init: {e}")))?;
+    mac.update(&page[offset..iv_end]);
+    mac.update(&page_no.to_le_bytes());
+    let expected = mac.finalize().into_bytes();
+    if expected.as_slice() != &page[hmac_start..hmac_end] {
+        return Err(DecryptError::HmacMismatch);
+    }
+
+    let mut scratch = page[offset..iv_start].to_vec();
+    let decrypted_body = cbc::Decryptor::<Aes256>::new_from_slices(key, &page[iv_start..iv_end])
+        .map_err(|e| DecryptError::Crypto(format!("cipher init: {e}")))?
+        .decrypt_padded_mut::<NoPadding>(&mut scratch)
+        .map_err(|e| DecryptError::Crypto(format!("decrypt failed: {e}")))?;
+
+    let mut out = Vec::<u8>::with_capacity(PAGE_SIZE);
+    if page_no == 1 {
+        out.extend_from_slice(b"SQLite format 3");
+        out.push(0x00);
+    }
+    out.extend_from_slice(decrypted_body);
+    out.extend_from_slice(&page[iv_start..PAGE_SIZE]);
+    Ok(out)
+}
+
+/// 解析 WAL 文件，返回（已提交帧：页号 -> WAL 内数据偏移，最终数据库页数）。
+/// 只保留最后一次 commit 之前的帧；之后的未提交帧忽略。
+fn collect_wal_committed_frames(wal: &[u8]) -> Option<(std::collections::HashMap<u32, usize>, u32)> {
+    const WAL_HEADER_SIZE: usize = 32;
+    const WAL_FRAME_HEADER_SIZE: usize = 24;
+    const PAGE_SIZE: usize = 4096;
+
+    if wal.len() < WAL_HEADER_SIZE {
+        return None;
+    }
+    let magic = u32::from_be_bytes(wal[0..4].try_into().ok()?);
+    if magic != 0x377F_0682 && magic != 0x377F_0683 {
+        return None;
+    }
+    let page_size = u32::from_be_bytes(wal[8..12].try_into().ok()?) as usize;
+    if page_size != PAGE_SIZE {
+        return None;
+    }
+    let header_salt = &wal[16..24];
+
+    let mut committed = std::collections::HashMap::<u32, usize>::new();
+    let mut pending = Vec::<(u32, usize)>::new();
+    let mut final_pages = 0u32;
+    let mut offset = WAL_HEADER_SIZE;
+    while offset + WAL_FRAME_HEADER_SIZE + PAGE_SIZE <= wal.len() {
+        let page_no = u32::from_be_bytes(wal[offset..offset + 4].try_into().ok()?);
+        let db_size_after = u32::from_be_bytes(wal[offset + 4..offset + 8].try_into().ok()?);
+        let frame_salt = &wal[offset + 8..offset + 16];
+        // salt 不匹配说明是 checkpoint 之后的旧帧，直接停止。
+        if frame_salt != header_salt || page_no == 0 {
+            break;
+        }
+        pending.push((page_no, offset + WAL_FRAME_HEADER_SIZE));
+        if db_size_after != 0 {
+            for (p, o) in pending.drain(..) {
+                committed.insert(p, o);
+            }
+            final_pages = db_size_after;
+        }
+        offset += WAL_FRAME_HEADER_SIZE + PAGE_SIZE;
+    }
+
+    if final_pages == 0 {
+        return None;
+    }
+    Some((committed, final_pages))
+}
+
 fn decrypt_db_file_v4_with_key(
     path: &Path,
     key_bytes: &[u8],
     treat_as_passphrase: bool,
 ) -> Result<Vec<u8>, DecryptError> {
-    const IV_SIZE: usize = 16;
-    const HMAC_SHA512_SIZE: usize = 64;
     const KEY_SIZE: usize = 32;
-    const AES_BLOCK_SIZE: usize = 16;
     const ROUND_COUNT: u32 = 256_000;
     const PAGE_SIZE: usize = 4096;
     const SALT_SIZE: usize = 16;
     const SQLITE_HEADER: &[u8] = b"SQLite format 3";
 
-    let mut buf = std::fs::read(path)?;
+    let buf = std::fs::read(path)?;
     if buf.starts_with(SQLITE_HEADER) {
         return Ok(buf);
     }
@@ -1051,54 +1259,55 @@ fn decrypt_db_file_v4_with_key(
     };
     let mac_key = pbkdf2_hmac_array::<Sha512, KEY_SIZE>(&key, &mac_salt, 2);
 
-    // SQLCipher reserved bytes per page are IV + HMAC, aligned to AES block size.
-    let mut reserve = IV_SIZE + HMAC_SHA512_SIZE;
-    if !reserve.is_multiple_of(AES_BLOCK_SIZE) {
-        reserve = ((reserve / AES_BLOCK_SIZE) + 1) * AES_BLOCK_SIZE;
-    }
-
     let total_pages = buf.len() / PAGE_SIZE;
-    let mut decrypted = Vec::<u8>::with_capacity(buf.len());
-
-    // Page 1 starts with the 16-byte SQLite header.
-    decrypted.extend_from_slice(SQLITE_HEADER);
-    decrypted.push(0x00);
-
-    type HmacSha512 = Hmac<Sha512>;
-    type Aes256CbcDec = cbc::Decryptor<Aes256>;
-
+    let mut pages: Vec<Vec<u8>> = Vec::with_capacity(total_pages);
     for cur_page in 0..total_pages {
-        let offset = if cur_page == 0 { SALT_SIZE } else { 0 };
-        let start = cur_page * PAGE_SIZE;
-        let end = start + PAGE_SIZE;
-
-        let iv_start = end - reserve;
-        let iv_end = iv_start + IV_SIZE;
-        let hmac_start = iv_start + IV_SIZE;
-        let hmac_end = hmac_start + HMAC_SHA512_SIZE;
-        if hmac_end > end {
-            return Err(DecryptError::Invalid(
-                "invalid db reserve region".to_string(),
-            ));
-        }
-
-        let mut mac = HmacSha512::new_from_slice(&mac_key)
-            .map_err(|e| DecryptError::Crypto(format!("hmac init: {e}")))?;
-        mac.update(&buf[start + offset..iv_start + IV_SIZE]);
-        mac.update(&((cur_page as u32) + 1).to_le_bytes());
-        let expected = mac.finalize().into_bytes();
-        if expected.as_slice() != &buf[hmac_start..hmac_end] {
-            return Err(DecryptError::HmacMismatch);
-        }
-
-        let iv = &buf[iv_start..iv_end];
-        let decrypted_page = Aes256CbcDec::new(&key.into(), iv.into())
-            .decrypt_padded_mut::<NoPadding>(&mut buf[start + offset..iv_start])
-            .map_err(|e| DecryptError::Crypto(format!("decrypt failed: {e}")))?;
-        decrypted.extend_from_slice(decrypted_page);
-        decrypted.extend_from_slice(&buf[iv_start..end]);
+        let plain = decrypt_page_image(
+            &buf[cur_page * PAGE_SIZE..(cur_page + 1) * PAGE_SIZE],
+            (cur_page as u32) + 1,
+            &key,
+            &mac_key,
+        )?;
+        pages.push(plain);
     }
 
+    // 微信运行时，最近的变更可能仍在 WAL 中；把已提交的 WAL 帧合并进来，
+    // 否则解密主库会漏掉新增/更新的表情记录。
+    let wal_path = {
+        let mut s = path.as_os_str().to_os_string();
+        s.push("-wal");
+        PathBuf::from(s)
+    };
+    if let Ok(wal) = std::fs::read(&wal_path) {
+        if let Some((committed, final_pages)) = collect_wal_committed_frames(&wal) {
+            let target_pages = final_pages as usize;
+            if pages.len() < target_pages {
+                pages.resize(target_pages, vec![0u8; PAGE_SIZE]);
+            }
+            for (page_no, data_offset) in committed {
+                let page_no = page_no as usize;
+                if page_no == 0 || page_no > target_pages {
+                    continue;
+                }
+                match decrypt_page_image(
+                    &wal[data_offset..data_offset + PAGE_SIZE],
+                    page_no as u32,
+                    &key,
+                    &mac_key,
+                ) {
+                    Ok(plain) => pages[page_no - 1] = plain,
+                    // 单帧校验失败不致命：保留主库页面，跳过该 WAL 帧。
+                    Err(_) => continue,
+                }
+            }
+            pages.truncate(target_pages);
+        }
+    }
+
+    let mut decrypted = Vec::<u8>::with_capacity(pages.len() * PAGE_SIZE);
+    for page in pages {
+        decrypted.extend_from_slice(&page);
+    }
     Ok(decrypted)
 }
 
@@ -1344,7 +1553,7 @@ async fn cmd_key(cli: &Cli, args: &KeyArgs) -> anyhow::Result<()> {
         seed_key_file_from_legacy(&key_file);
     }
 
-    let wechat_app = resolve_user_path(&cli.wechat_app)?;
+    let wechat_app = resolve_wechat_app(&cli.wechat_app)?;
 
     let key = get_or_dump_key(
         &account.wxid,
@@ -1378,9 +1587,6 @@ async fn cmd_key(cli: &Cli, args: &KeyArgs) -> anyhow::Result<()> {
     }
 
     if args.open {
-        #[cfg(target_os = "macos")]
-        open_reveal(&key_file)?;
-        #[cfg(target_os = "linux")]
         open_reveal(&key_file)?;
     }
     Ok(())
@@ -1448,7 +1654,7 @@ async fn cmd_urls(cli: &Cli, args: &UrlsArgs) -> anyhow::Result<()> {
     let _ = std::fs::remove_file(&log_file);
     let _ = std::fs::write(&log_file, "");
 
-    let wechat_app = resolve_user_path(&cli.wechat_app)?;
+    let wechat_app = resolve_wechat_app(&cli.wechat_app)?;
 
     let mut db_key = get_or_dump_key(
         &account.wxid,
@@ -1545,9 +1751,6 @@ async fn cmd_urls(cli: &Cli, args: &UrlsArgs) -> anyhow::Result<()> {
     }
 
     if args.open {
-        #[cfg(target_os = "macos")]
-        open_reveal(&out_file)?;
-        #[cfg(target_os = "linux")]
         open_reveal(&out_file)?;
     }
     Ok(())
@@ -1583,7 +1786,7 @@ async fn cmd_export(cli: &Cli, args: &ExportArgs) -> anyhow::Result<()> {
         let urls_log = urls_log_for_wxid(&account.wxid)?;
         let key_file = key_file_for_wxid(&account.wxid)?;
         let key_log = key_log_for_wxid(&account.wxid)?;
-        let wechat_app = resolve_user_path(&cli.wechat_app)?;
+        let wechat_app = resolve_wechat_app(&cli.wechat_app)?;
 
         ensure_private_default_out_dir()?;
         let _ = std::fs::remove_file(&urls_file);
@@ -1670,12 +1873,8 @@ async fn cmd_export(cli: &Cli, args: &ExportArgs) -> anyhow::Result<()> {
             "每 50 张分组（推荐，适配飞书/企微/钉钉一次最多选 50 张）",
             "全部放在一个目录（不分组）",
         ];
-        let idx = Select::with_theme(&ColorfulTheme::default())
-            .with_prompt("请选择导出方式")
-            .items(&choices)
-            .default(0)
-            .interact_on(&term_stderr())
-            .context("读取选择失败")?;
+        eprintln!("请选择导出方式：");
+        let idx = choose_numbered("请输入序号", &choices, 0)?;
         if idx == 0 {
             50
         } else {
@@ -1688,7 +1887,7 @@ async fn cmd_export(cli: &Cli, args: &ExportArgs) -> anyhow::Result<()> {
         resolve_user_path(p)?
     } else {
         let ts = chrono_like_timestamp();
-        let default = downloads_dir()?.join(format!("微信表情包_导出_{ts}"));
+        let default = default_export_base_dir()?.join(format!("微信表情包_导出_{ts}"));
         if cli.no_interactive {
             default
         } else {
@@ -1827,9 +2026,6 @@ async fn cmd_export(cli: &Cli, args: &ExportArgs) -> anyhow::Result<()> {
     }
 
     if args.open {
-        #[cfg(target_os = "macos")]
-        open_dir(&out_dir)?;
-        #[cfg(target_os = "linux")]
         open_dir(&out_dir)?;
     }
 
@@ -1838,10 +2034,10 @@ async fn cmd_export(cli: &Cli, args: &ExportArgs) -> anyhow::Result<()> {
 
 #[allow(unreachable_code)]
 async fn cmd_update(args: &UpdateArgs) -> anyhow::Result<()> {
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
     {
         let _ = args;
-        return Err(anyhow!("`wxemoticon update` 目前仅支持 macOS"));
+        return Err(anyhow!("`wxemoticon update` 目前仅支持 macOS / Windows"));
     }
 
     #[cfg(target_os = "macos")]
@@ -1912,6 +2108,58 @@ async fn cmd_update(args: &UpdateArgs) -> anyhow::Result<()> {
             .args(["-lc", &cmdline])
             .status()
             .context("执行更新命令失败")?;
+
+        if !status.success() {
+            return Err(anyhow!("更新失败（退出码：{}）", status));
+        }
+
+        if args.json {
+            let out = UpdateResult {
+                version,
+                install_dir: install_dir.display().to_string(),
+                repo: args.repo.trim().to_string(),
+                installer_url,
+            };
+            println!("{}", serde_json::to_string(&out)?);
+        } else {
+            println!("更新完成。请运行 `wxemoticon --version` 验证版本。");
+        }
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        let install_dir = if let Some(v) = &args.install_dir {
+            resolve_user_path(v)?
+        } else {
+            home_dir()?.join(".local/bin")
+        };
+
+        let version = args
+            .version
+            .as_ref()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| "latest".to_string());
+
+        let installer_url = format!(
+            "https://raw.githubusercontent.com/{}/main/scripts/install-wxemoticon.ps1",
+            args.repo.trim()
+        );
+        let cmdline = format!("irm -UseBasicParsing '{installer_url}' | iex");
+
+        if !args.json {
+            eprintln!("开始更新 wxemoticon（version: {version}）...");
+        }
+
+        let mut command = Command::new("powershell");
+        command
+            .args(["-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", &cmdline])
+            .env("WXEMOTICON_REPO", args.repo.trim())
+            .env("INSTALL_DIR", install_dir.display().to_string());
+        if version != "latest" {
+            command.env("WXEMOTICON_VERSION", &version);
+        }
+        let status = command.status().context("执行更新命令失败")?;
 
         if !status.success() {
             return Err(anyhow!("更新失败（退出码：{}）", status));
@@ -2015,6 +2263,136 @@ mod cli_tests {
         );
     }
 
+    fn build_wal_frame(page_no: u32, db_size_after: u32, salt: &[u8; 8], fill: u8) -> Vec<u8> {
+        let mut frame = Vec::new();
+        frame.extend_from_slice(&page_no.to_be_bytes());
+        frame.extend_from_slice(&db_size_after.to_be_bytes());
+        frame.extend_from_slice(salt);
+        frame.extend_from_slice(&[0u8; 8]); // checksums（解析时不校验）
+        frame.extend(vec![fill; 4096]);
+        frame
+    }
+
+    fn build_wal(frames: &[Vec<u8>]) -> Vec<u8> {
+        let mut wal = Vec::new();
+        wal.extend_from_slice(&0x377F_0682u32.to_be_bytes()); // magic
+        wal.extend_from_slice(&3_007_000u32.to_be_bytes()); // format version
+        wal.extend_from_slice(&4096u32.to_be_bytes()); // page size
+        wal.extend_from_slice(&0u32.to_be_bytes()); // checkpoint seq
+        wal.extend_from_slice(&[1u8; 8]); // salt1 + salt2
+        wal.extend_from_slice(&[0u8; 8]); // checksums
+        for f in frames {
+            wal.extend_from_slice(f);
+        }
+        wal
+    }
+
+    #[test]
+    fn wal_parser_keeps_only_committed_frames_and_final_size() {
+        let salt = [1u8; 8];
+        let frames = vec![
+            build_wal_frame(2, 0, &salt, 0xAA),
+            build_wal_frame(3, 5, &salt, 0xBB), // commit：db 共 5 页
+            build_wal_frame(4, 0, &salt, 0xCC), // 未提交，应忽略
+        ];
+        let wal = build_wal(&frames);
+
+        let (committed, final_pages) = collect_wal_committed_frames(&wal).unwrap();
+
+        assert_eq!(final_pages, 5);
+        assert_eq!(committed.len(), 2);
+        assert!(committed.contains_key(&2));
+        assert!(committed.contains_key(&3));
+        assert!(!committed.contains_key(&4));
+        assert_eq!(wal[committed[&3]..committed[&3] + 4], [0xBB; 4]);
+    }
+
+    #[test]
+    fn wal_parser_ignores_stale_frames_with_mismatched_salt() {
+        let salt = [1u8; 8];
+        let stale_salt = [9u8; 8];
+        let frames = vec![
+            build_wal_frame(2, 3, &salt, 0xAA),
+            build_wal_frame(4, 6, &stale_salt, 0xDD),
+        ];
+        let wal = build_wal(&frames);
+
+        let (committed, final_pages) = collect_wal_committed_frames(&wal).unwrap();
+
+        assert_eq!(final_pages, 3);
+        assert!(!committed.contains_key(&4));
+    }
+
+    #[test]
+    fn wal_parser_rejects_invalid_headers_and_empty_logs() {
+        assert!(collect_wal_committed_frames(&[]).is_none());
+        assert!(collect_wal_committed_frames(&[0u8; 32]).is_none());
+
+        // 没有任何 commit 帧时视为无有效内容。
+        let salt = [1u8; 8];
+        let wal = build_wal(&[build_wal_frame(2, 0, &salt, 0xAA)]);
+        assert!(collect_wal_committed_frames(&wal).is_none());
+    }
+
+    #[test]
+    fn page_decryption_round_trips_an_encrypted_page() {
+        use cbc::cipher::BlockEncryptMut;
+
+        const PAGE_SIZE: usize = 4096;
+        const SALT_SIZE: usize = 16;
+        const IV_SIZE: usize = 16;
+        const HMAC_SIZE: usize = 64;
+        const RESERVED: usize = IV_SIZE + HMAC_SIZE;
+
+        let key = [0x55u8; 32];
+        let mut page = [0u8; PAGE_SIZE];
+        for (index, byte) in page[SALT_SIZE..PAGE_SIZE - RESERVED].iter_mut().enumerate() {
+            *byte = (index % 251) as u8;
+        }
+        let original_body = page[SALT_SIZE..PAGE_SIZE - RESERVED].to_vec();
+
+        let salt = page[..SALT_SIZE].to_vec();
+        let mac_salt: Vec<u8> = salt.iter().map(|byte| byte ^ 0x3a).collect();
+        let mac_key = pbkdf2_hmac_array::<Sha512, 32>(&key, &mac_salt, 2);
+
+        let iv = [7u8; IV_SIZE];
+        let iv_start = PAGE_SIZE - RESERVED;
+        let iv_end = iv_start + IV_SIZE;
+        let body_len = page[SALT_SIZE..iv_start].len();
+        cbc::Encryptor::<Aes256>::new_from_slices(&key, &iv)
+            .unwrap()
+            .encrypt_padded_mut::<NoPadding>(&mut page[SALT_SIZE..iv_start], body_len)
+            .unwrap();
+        page[iv_start..iv_end].copy_from_slice(&iv);
+
+        let mut mac = Hmac::<Sha512>::new_from_slice(&mac_key).unwrap();
+        mac.update(&page[SALT_SIZE..iv_end]);
+        mac.update(&1u32.to_le_bytes());
+        page[iv_end..].copy_from_slice(&mac.finalize().into_bytes());
+
+        let plain = decrypt_page_image(&page, 1, &key, &mac_key).unwrap();
+        assert_eq!(&plain[..16], b"SQLite format 3\0");
+        assert_eq!(plain[16..iv_start], original_body[..]);
+        assert_eq!(plain[iv_start..], page[iv_start..]);
+
+        // 篡改任意密文字节应导致校验失败。
+        let mut tampered = page;
+        tampered[100] ^= 1;
+        assert!(decrypt_page_image(&tampered, 1, &key, &mac_key).is_err());
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn windows_export_base_is_exe_directory() {
+        // exe 在 D:\tools\wxemoticon\ 下时，默认导出根目录即该目录。
+        let base = exe_dir(Path::new(r"D:\tools\wxemoticon\wxemoticon.exe"));
+        assert_eq!(base, PathBuf::from(r"D:\tools\wxemoticon"));
+
+        // exe 直接位于盘符根目录时，导出根目录即盘符根。
+        let root = exe_dir(Path::new(r"D:\wxemoticon.exe"));
+        assert_eq!(root, PathBuf::from(r"D:\"));
+    }
+
     #[test]
     fn download_candidates_fall_back_to_the_tls_valid_wechat_cdn_host() {
         let source = "https://vweixinf.tc.qq.com/110/20401/stodownload.webp?m=abc&hy=SZ";
@@ -2025,6 +2403,21 @@ mod cli_tests {
         assert!(candidates.contains(
             &"https://wxapp.tc.qq.com/110/20401/stodownload.webp?m=abc&hy=SZ".to_string()
         ));
+    }
+}
+
+fn resolve_wechat_app(input: &str) -> anyhow::Result<PathBuf> {
+    #[cfg(target_os = "windows")]
+    {
+        let resolved = resolve_user_path(input)?;
+        if resolved.as_os_str().is_empty() {
+            return windows::discover_wechat_bin();
+        }
+        return Ok(resolved);
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        resolve_user_path(input)
     }
 }
 

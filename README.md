@@ -1,10 +1,10 @@
-# 导出微信表情包（macOS / Linux）
+# 导出微信表情包（macOS / Linux / Windows）
 
 [![release](https://github.com/liusheng22/export-wechat-emoji/actions/workflows/release.yml/badge.svg)](https://github.com/liusheng22/export-wechat-emoji/actions/workflows/release.yml)
 
 > 一键导出微信收藏表情包，方便批量导入飞书、企微、钉钉等平台。
 
-> GUI 目前支持 macOS；`wxemoticon` 命令行工具支持 macOS 和 Linux。
+> GUI 目前支持 macOS；`wxemoticon` 命令行工具支持 macOS、Linux 和 Windows。
 
 ## 功能概览
 
@@ -13,6 +13,44 @@
 - 导出支持每 50 张分组或不分组
 - 支持断点续跑（跳过已存在文件）与导出统计
 - 提供可选 CLI：`wxemoticon`
+
+## Windows CLI
+
+已适配 Windows 微信 4.x（默认程序 `C:\Program Files\Tencent\Weixin\Weixin.exe`，默认数据目录 `%USERPROFILE%\xwechat_files`）。
+
+微信正在运行并已登录时可直接导出，无需退出微信；未运行时会启动一次临时微信实例，需要重新抓 key 时会提示先登录并打开一次表情面板。
+
+### 从源码构建
+
+需要 Rust stable（MSVC 工具链）和 Visual Studio Build Tools（含 "使用 C++ 的桌面开发" 工作负载）：
+
+```powershell
+git clone https://github.com/liusheng22/export-wechat-emoji.git
+cd export-wechat-emoji
+cargo build --manifest-path cli/Cargo.toml --release
+# 产物：cli\target\release\wxemoticon.exe
+```
+
+### 使用
+
+```powershell
+# 查看账号（默认读取 %USERPROFILE%\xwechat_files）
+wxemoticon urls --list-accounts
+
+# 直接导出
+wxemoticon export
+```
+
+非默认安装或数据位置可显式指定：
+
+```powershell
+wxemoticon `
+  --wechat-bin "C:\Program Files\Tencent\Weixin\Weixin.exe" `
+  --wechat-data-dir "C:\Users\<你>\xwechat_files" `
+  export
+```
+
+缓存与日志默认写入 `%LOCALAPPDATA%\wxemoticon`，图片默认导出到 wxemoticon.exe 所在目录下的 `微信表情包_导出_<时间戳>`（可用 `--out-dir` 指定）。
 
 ## Linux CLI（Ubuntu/Debian x86_64）
 
@@ -88,9 +126,11 @@ wxemoticon export --urls-file /tmp/emoticon_urls.txt
 
 ## CLI（命令行方式）
 
-如果你更喜欢命令行，可使用 `wxemoticon`（macOS / Linux）。
+如果你更喜欢命令行，可使用 `wxemoticon`（macOS / Windows）。
 
 安装方式 A：安装脚本（默认，零配置）
+
+macOS：
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/liusheng22/export-wechat-emoji/main/scripts/install-wxemoticon.sh | bash
@@ -102,7 +142,19 @@ curl -fsSL https://raw.githubusercontent.com/liusheng22/export-wechat-emoji/main
 curl -fsSL https://raw.githubusercontent.com/liusheng22/export-wechat-emoji/main/scripts/install-wxemoticon.sh | env WXEMOTICON_VERSION=v0.2.0 bash
 ```
 
-安装方式 B：Homebrew（推荐长期维护）
+Windows（PowerShell）：
+
+```powershell
+irm https://raw.githubusercontent.com/liusheng22/export-wechat-emoji/main/scripts/install-wxemoticon.ps1 | iex
+```
+
+升级到指定版本（例如 `v0.2.0`）：
+
+```powershell
+$env:WXEMOTICON_VERSION = 'v0.2.0'; irm https://raw.githubusercontent.com/liusheng22/export-wechat-emoji/main/scripts/install-wxemoticon.ps1 | iex
+```
+
+安装方式 B：Homebrew（推荐长期维护，仅 macOS）
 
 ```bash
 brew tap liusheng22/wxemoticon
@@ -130,7 +182,7 @@ echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.zshrc
 source ~/.zshrc
 ```
 
-CLI 内置升级命令（脚本安装用户可用）：
+CLI 内置升级命令（脚本安装用户可用；macOS / Windows）：
 
 ```bash
 # 升级到最新
