@@ -136,10 +136,10 @@ macOS：
 curl -fsSL https://raw.githubusercontent.com/liusheng22/export-wechat-emoji/main/scripts/install-wxemoticon.sh | bash
 ```
 
-升级到指定版本（例如 `v0.2.0`）：
+升级到指定版本（例如 `v0.3.0`）：
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/liusheng22/export-wechat-emoji/main/scripts/install-wxemoticon.sh | env WXEMOTICON_VERSION=v0.2.0 bash
+curl -fsSL https://raw.githubusercontent.com/liusheng22/export-wechat-emoji/main/scripts/install-wxemoticon.sh | env WXEMOTICON_VERSION=v0.3.0 bash
 ```
 
 Windows（PowerShell）：
@@ -148,10 +148,10 @@ Windows（PowerShell）：
 irm https://raw.githubusercontent.com/liusheng22/export-wechat-emoji/main/scripts/install-wxemoticon.ps1 | iex
 ```
 
-升级到指定版本（例如 `v0.2.0`）：
+升级到指定版本（例如 `v0.3.0`）：
 
 ```powershell
-$env:WXEMOTICON_VERSION = 'v0.2.0'; irm https://raw.githubusercontent.com/liusheng22/export-wechat-emoji/main/scripts/install-wxemoticon.ps1 | iex
+$env:WXEMOTICON_VERSION = 'v0.3.0'; irm https://raw.githubusercontent.com/liusheng22/export-wechat-emoji/main/scripts/install-wxemoticon.ps1 | iex
 ```
 
 安装方式 B：Homebrew（推荐长期维护，仅 macOS）
@@ -189,7 +189,7 @@ CLI 内置升级命令（脚本安装用户可用；macOS / Windows）：
 wxemoticon update
 
 # 升级到指定版本
-wxemoticon update --version v0.2.0
+wxemoticon update --version v0.3.0
 ```
 
 说明：
