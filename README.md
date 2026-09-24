@@ -24,30 +24,27 @@
 
 需要 Rust stable（MSVC 工具链）和 Visual Studio Build Tools（含 "使用 C++ 的桌面开发" 工作负载）：
 
-```powershell
+```cmd
 git clone https://github.com/liusheng22/export-wechat-emoji.git
 cd export-wechat-emoji
 cargo build --manifest-path cli/Cargo.toml --release
-# 产物：cli\target\release\wxemoticon.exe
+rem 产物：cli\target\release\wxemoticon.exe
 ```
 
 ### 使用
 
-```powershell
-# 查看账号（默认读取 %USERPROFILE%\xwechat_files）
+```cmd
+rem 查看账号（默认读取 %USERPROFILE%\xwechat_files）
 wxemoticon urls --list-accounts
 
-# 直接导出
+rem 直接导出
 wxemoticon export
 ```
 
 非默认安装或数据位置可显式指定：
 
-```powershell
-wxemoticon `
-  --wechat-bin "C:\Program Files\Tencent\Weixin\Weixin.exe" `
-  --wechat-data-dir "C:\Users\<你>\xwechat_files" `
-  export
+```cmd
+wxemoticon --wechat-bin "C:\Program Files\Tencent\Weixin\Weixin.exe" --wechat-data-dir "C:\Users\<你>\xwechat_files" export
 ```
 
 缓存与日志默认写入 `%LOCALAPPDATA%\wxemoticon`，图片默认导出到系统"下载"文件夹（自动跟随 Windows 重定向设置，如 OneDrive 路径；可用 `--out-dir` 指定）。
@@ -142,18 +139,18 @@ curl -fsSL https://raw.githubusercontent.com/liusheng22/export-wechat-emoji/main
 curl -fsSL https://raw.githubusercontent.com/liusheng22/export-wechat-emoji/main/scripts/install-wxemoticon.sh | env WXEMOTICON_VERSION=v0.3.0 bash
 ```
 
-Windows（PowerShell）：
+Windows（cmd / PowerShell 均可）：
 
-```powershell
-irm https://raw.githubusercontent.com/liusheng22/export-wechat-emoji/main/scripts/install-wxemoticon.ps1 | iex
+```cmd
+powershell -NoProfile -ExecutionPolicy Bypass -Command "irm https://raw.githubusercontent.com/liusheng22/export-wechat-emoji/main/scripts/install-wxemoticon.ps1 | iex"
 ```
 
-安装到 `%LOCALAPPDATA%\Programs\wxemoticon` 并自动加入用户 PATH，新开终端即可使用 `wxemoticon`（设 `$env:WXEMOTICON_NO_PATH_MODIFY=1` 可跳过 PATH 修改）。
+安装到 `%LOCALAPPDATA%\Programs\wxemoticon` 并自动加入用户 PATH，新开终端即可使用 `wxemoticon`（设 `WXEMOTICON_NO_PATH_MODIFY=1` 可跳过 PATH 修改）。
 
 升级到指定版本（例如 `v0.3.0`）：
 
-```powershell
-$env:WXEMOTICON_VERSION = 'v0.3.0'; irm https://raw.githubusercontent.com/liusheng22/export-wechat-emoji/main/scripts/install-wxemoticon.ps1 | iex
+```cmd
+powershell -NoProfile -ExecutionPolicy Bypass -Command "$env:WXEMOTICON_VERSION='v0.3.0'; irm https://raw.githubusercontent.com/liusheng22/export-wechat-emoji/main/scripts/install-wxemoticon.ps1 | iex"
 ```
 
 安装方式 B：Homebrew（推荐长期维护，仅 macOS）

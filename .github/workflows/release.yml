@@ -98,8 +98,8 @@ jobs:
             CLI 安装（macOS / Linux）：
             curl -fsSL https://raw.githubusercontent.com/liusheng22/export-wechat-emoji/main/scripts/install-wxemoticon.sh | bash
 
-            CLI 安装（Windows，PowerShell）：
-            irm https://raw.githubusercontent.com/liusheng22/export-wechat-emoji/main/scripts/install-wxemoticon.ps1 | iex
+            CLI 安装（Windows，cmd / PowerShell）：
+            powershell -NoProfile -ExecutionPolicy Bypass -Command "irm https://raw.githubusercontent.com/liusheng22/export-wechat-emoji/main/scripts/install-wxemoticon.ps1 | iex"
 
             CLI 常用命令：
             - wxemoticon key

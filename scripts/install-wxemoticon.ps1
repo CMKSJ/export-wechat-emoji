@@ -1,8 +1,8 @@
 <#
 wxemoticon installer (Windows)
 
-Usage:
-  irm https://raw.githubusercontent.com/liusheng22/export-wechat-emoji/main/scripts/install-wxemoticon.ps1 | iex
+Usage (cmd / PowerShell):
+  powershell -NoProfile -ExecutionPolicy Bypass -Command "irm https://raw.githubusercontent.com/liusheng22/export-wechat-emoji/main/scripts/install-wxemoticon.ps1 | iex"
 
 Options:
   $env:WXEMOTICON_REPO           default: liusheng22/export-wechat-emoji
