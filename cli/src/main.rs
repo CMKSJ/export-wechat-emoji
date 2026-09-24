@@ -4,7 +4,7 @@ use cbc::cipher::block_padding::NoPadding;
 use cbc::cipher::{BlockDecryptMut, KeyIvInit};
 use clap::{Parser, Subcommand};
 use dialoguer::theme::ColorfulTheme;
-use dialoguer::{Confirm, Input};
+use dialoguer::{Confirm, Input, Select};
 use hmac::{Hmac, Mac};
 use indicatif::{ProgressBar, ProgressStyle};
 use pbkdf2::pbkdf2_hmac_array;
@@ -305,25 +305,6 @@ async fn main() -> anyhow::Result<()> {
 
 fn term_stderr() -> dialoguer::console::Term {
     dialoguer::console::Term::stderr()
-}
-
-/// 序号选择：打印选项并读取序号（回车取默认）。
-/// 不用 dialoguer 的 Select：其在部分 Windows 终端重绘中文列表时可能丢行。
-fn choose_numbered(prompt: &str, items: &[&str], default_index: usize) -> anyhow::Result<usize> {
-    loop {
-        for (i, item) in items.iter().enumerate() {
-            eprintln!("  {}) {}", i + 1, item);
-        }
-        let input: String = Input::with_theme(&ColorfulTheme::default())
-            .with_prompt(prompt)
-            .default((default_index + 1).to_string())
-            .interact_text_on(&term_stderr())
-            .context("读取选择失败")?;
-        match input.trim().parse::<usize>() {
-            Ok(n) if (1..=items.len()).contains(&n) => return Ok(n - 1),
-            _ => eprintln!("无效序号，请输入 1-{} 或直接回车", items.len()),
-        }
-    }
 }
 
 fn home_dir() -> anyhow::Result<PathBuf> {
@@ -838,10 +819,20 @@ fn select_account(
     eprintln!("检测到 {} 个账号，请选择：", accounts.len());
     let labels: Vec<String> = accounts
         .iter()
-        .map(|a| format!("{}（emoticon.db 更新：{}）", a.wxid, format_mtime(a.emoticon_db_mtime)))
+        .map(|a| {
+            format!(
+                "{}（emoticon.db 更新：{}）",
+                a.wxid,
+                format_mtime(a.emoticon_db_mtime)
+            )
+        })
         .collect();
-    let items: Vec<&str> = labels.iter().map(|s| s.as_str()).collect();
-    let idx = choose_numbered("请输入账号序号", &items, 0)?;
+    let idx = Select::with_theme(&ColorfulTheme::default())
+        .with_prompt("请输入序号")
+        .items(&labels)
+        .default(0)
+        .interact_on(&term_stderr())
+        .context("读取选择失败")?;
     Ok(accounts[idx].clone())
 }
 
@@ -1881,8 +1872,12 @@ async fn cmd_export(cli: &Cli, args: &ExportArgs) -> anyhow::Result<()> {
             "每 50 张分组（推荐，适配飞书/企微/钉钉一次最多选 50 张）",
             "全部放在一个目录（不分组）",
         ];
-        eprintln!("请选择导出方式：");
-        let idx = choose_numbered("请输入序号", &choices, 0)?;
+        let idx = Select::with_theme(&ColorfulTheme::default())
+            .with_prompt("请选择导出方式")
+            .items(&choices)
+            .default(0)
+            .interact_on(&term_stderr())
+            .context("读取选择失败")?;
         if idx == 0 {
             50
         } else {
