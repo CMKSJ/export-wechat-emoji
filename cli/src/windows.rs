@@ -711,41 +711,69 @@ pub(crate) fn dump_db_key(
     ))
 }
 
-/// 从注册表 App Paths 读取 exe 完整路径（ShellExecute 同款机制）。
-fn registry_app_path(exe_name: &str) -> Option<PathBuf> {
-    let subkey: Vec<u16> = format!(
-        "SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\App Paths\\{exe_name}\0"
-    )
-    .encode_utf16()
-    .collect();
-    for root in [HKEY_LOCAL_MACHINE, HKEY_CURRENT_USER] {
-        unsafe {
-            let mut hkey: HKEY = std::ptr::null_mut();
-            if RegOpenKeyExW(root, subkey.as_ptr(), 0, KEY_READ, &mut hkey) != 0 {
-                continue;
+/// 读注册表 REG_SZ 值；value_name 为 None 时读键的默认值。
+fn registry_read_sz(root: HKEY, subkey: &str, value_name: Option<&str>) -> Option<String> {
+    let subkey_w: Vec<u16> = format!("{subkey}\0").encode_utf16().collect();
+    let value_w: Option<Vec<u16>> = value_name.map(|v| format!("{v}\0").encode_utf16().collect());
+    unsafe {
+        let mut hkey: HKEY = std::ptr::null_mut();
+        if RegOpenKeyExW(root, subkey_w.as_ptr(), 0, KEY_READ, &mut hkey) != 0 {
+            return None;
+        }
+        let mut buf = [0u16; 512];
+        let mut byte_len = (buf.len() * 2) as u32;
+        let mut value_type = 0u32;
+        let ok = RegQueryValueExW(
+            hkey,
+            value_w
+                .as_ref()
+                .map_or(std::ptr::null(), |v| v.as_ptr()),
+            std::ptr::null_mut(),
+            &mut value_type,
+            buf.as_mut_ptr() as *mut u8,
+            &mut byte_len,
+        );
+        RegCloseKey(hkey);
+        if ok == 0 && value_type == REG_SZ {
+            let chars = (byte_len as usize / 2).min(buf.len());
+            let text = String::from_utf16_lossy(&buf[..chars]);
+            let text = text.trim_end_matches('\0').trim().trim_matches('"');
+            if text.is_empty() {
+                return None;
             }
-            let mut buf = [0u16; 512];
-            let mut byte_len = (buf.len() * 2) as u32;
-            let mut value_type = 0u32;
-            let ok = RegQueryValueExW(
-                hkey,
-                std::ptr::null(),
-                std::ptr::null_mut(),
-                &mut value_type,
-                buf.as_mut_ptr() as *mut u8,
-                &mut byte_len,
-            );
-            RegCloseKey(hkey);
-            if ok == 0 && value_type == REG_SZ {
-                let chars = byte_len as usize / 2;
-                let text = String::from_utf16_lossy(&buf[..chars.min(buf.len())]);
-                let text = text.trim_end_matches('\0').trim();
-                // App Paths 里可能带引号包裹。
-                let text = text.trim_matches('"');
-                let path = PathBuf::from(text);
+            return Some(text.to_string());
+        }
+    }
+    None
+}
+
+/// 腾讯注册表的 InstallPath（实测 Weixin 4.x 写在 HKCU\Software\Tencent\Weixin，
+/// 值为安装目录；官方安装器不注册 App Paths）。
+fn registry_tencent_bin() -> Option<PathBuf> {
+    for (subkey, exe) in [
+        ("Software\\Tencent\\Weixin", "Weixin.exe"),
+        ("Software\\Tencent\\WeChat", "WeChat.exe"),
+    ] {
+        for root in [HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE] {
+            if let Some(dir) = registry_read_sz(root, subkey, Some("InstallPath")) {
+                let path = PathBuf::from(dir).join(exe);
                 if path.is_file() {
                     return Some(path);
                 }
+            }
+        }
+    }
+    None
+}
+
+/// 注册表 App Paths 的 exe 完整路径（ShellExecute 同款机制，微信通常不注册，兜底用）。
+fn registry_app_path(exe_name: &str) -> Option<PathBuf> {
+    for root in [HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE] {
+        let subkey = format!("SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\App Paths\\{exe_name}");
+        if let Some(text) = registry_read_sz(root, &subkey, None) {
+            let path = PathBuf::from(text);
+            if path.is_file() {
+                return Some(path);
             }
         }
     }
@@ -776,13 +804,17 @@ pub(crate) fn discover_wechat_bin() -> Option<PathBuf> {
     if let Some(path) = running_wechat_bin() {
         return Some(path);
     }
-    // 2) 注册表 App Paths（HKLM/HKCU，兼容每用户安装与自定义安装位置）。
+    // 2) 腾讯注册表 InstallPath（官方安装器实际写入的位置）。
+    if let Some(path) = registry_tencent_bin() {
+        return Some(path);
+    }
+    // 3) 注册表 App Paths（兜底）。
     for exe_name in ["Weixin.exe", "WeChat.exe"] {
         if let Some(path) = registry_app_path(exe_name) {
             return Some(path);
         }
     }
-    // 3) Program Files 常规位置（微信 4.x 官方名为 Weixin；保留旧版 WeChat 兼容）。
+    // 4) Program Files 常规位置（微信 4.x 官方名为 Weixin；保留旧版 WeChat 兼容）。
     for env_key in ["ProgramFiles", "ProgramFiles(x86)"] {
         if let Some(program_files) = std::env::var_os(env_key) {
             let program_files = PathBuf::from(&program_files);
@@ -894,6 +926,21 @@ mod tests {
         assert!(is_wechat_process_name("WeChatAppEx.exe"));
         assert!(!is_wechat_process_name("wxemoticon.exe"));
         assert!(!is_wechat_process_name("explorer.exe"));
+    }
+
+    #[test]
+    fn tencent_registry_detection_matches_local_install() {
+        // 本机装有 Weixin 时应能通过 HKCU\Software\Tencent\Weixin 定位；
+        // 未安装微信的环境跳过（键不存在）。
+        if let Some(bin) = registry_tencent_bin() {
+            assert!(bin.is_file(), "注册表定位的微信程序应存在：{}", bin.display());
+            let name = bin
+                .file_name()
+                .unwrap()
+                .to_string_lossy()
+                .to_ascii_lowercase();
+            assert!(name == "weixin.exe" || name == "wechat.exe");
+        }
     }
 
     #[test]
