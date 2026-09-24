@@ -1,4 +1,4 @@
-#Requires -Version 5.1
+﻿#Requires -Version 5.1
 <#
 wxemoticon installer (Windows)
 
@@ -14,7 +14,8 @@ Options:
 $ErrorActionPreference = 'Stop'
 
 $Repo = if ($env:WXEMOTICON_REPO) { $env:WXEMOTICON_REPO } else { 'liusheng22/export-wechat-emoji' }
-$InstallDir = if ($env:INSTALL_DIR) { $env:INSTALL_DIR } else { Join-Path $env:USERPROFILE '.local\bin' }
+# Windows 惯例：每用户程序安装到 %LOCALAPPDATA%\Programs（VS Code 用户安装、winget portable 同款位置）
+$InstallDir = if ($env:INSTALL_DIR) { $env:INSTALL_DIR } else { Join-Path $env:LOCALAPPDATA 'Programs\wxemoticon' }
 $Version = if ($env:WXEMOTICON_VERSION) { $env:WXEMOTICON_VERSION } else { 'latest' }
 
 if ($env:PROCESSOR_ARCHITECTURE -ne 'AMD64') {
@@ -50,12 +51,23 @@ try {
   Write-Host "安装完成：$InstallDir\wxemoticon.exe"
   Write-Host '验证：wxemoticon --help'
 
-  $InPath = ($env:PATH -split ';' | ForEach-Object { $_.TrimEnd('\') } | Where-Object { $_ -eq $InstallDir.TrimEnd('\') }).Count -gt 0
-  if (-not $InPath) {
-    Write-Host ''
-    Write-Host "提示：你的 PATH 里可能还没有 $InstallDir"
-    Write-Host '可把下面这行加到 PowerShell 配置文件（$PROFILE）后重开终端：'
-    Write-Host "  `$env:Path += `";$InstallDir`""
+  # 自动加入用户 PATH（写注册表 HKCU\Environment，幂等；设 WXEMOTICON_NO_PATH_MODIFY=1 可跳过）
+  $NormDir = $InstallDir.TrimEnd('\').ToLowerInvariant()
+  $UserPath = [Environment]::GetEnvironmentVariable('Path', 'User')
+  $InPath = @($UserPath -split ';' | ForEach-Object { $_.Trim().TrimEnd('\').ToLowerInvariant() } |
+    Where-Object { $_ -eq $NormDir }).Count -gt 0
+  if ($InPath) {
+    Write-Host "PATH 已包含 $InstallDir"
+  } elseif ($env:WXEMOTICON_NO_PATH_MODIFY) {
+    Write-Host "已跳过 PATH 修改（WXEMOTICON_NO_PATH_MODIFY 已设置），请自行把 $InstallDir 加入 PATH"
+  } else {
+    if ([string]::IsNullOrEmpty($UserPath)) {
+      $NewPath = $InstallDir
+    } else {
+      $NewPath = $UserPath.TrimEnd(';') + ';' + $InstallDir
+    }
+    [Environment]::SetEnvironmentVariable('Path', $NewPath, 'User')
+    Write-Host "已把 $InstallDir 加入用户 PATH（新开终端生效）"
   }
 } finally {
   Remove-Item -Recurse -Force $TmpDir -ErrorAction SilentlyContinue

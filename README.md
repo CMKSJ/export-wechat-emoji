@@ -148,6 +148,8 @@ Windows（PowerShell）：
 irm https://raw.githubusercontent.com/liusheng22/export-wechat-emoji/main/scripts/install-wxemoticon.ps1 | iex
 ```
 
+安装到 `%LOCALAPPDATA%\Programs\wxemoticon` 并自动加入用户 PATH，新开终端即可使用 `wxemoticon`（设 `$env:WXEMOTICON_NO_PATH_MODIFY=1` 可跳过 PATH 修改）。
+
 升级到指定版本（例如 `v0.3.0`）：
 
 ```powershell
