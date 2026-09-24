@@ -50,7 +50,7 @@ wxemoticon `
   export
 ```
 
-缓存与日志默认写入 `%LOCALAPPDATA%\wxemoticon`。图片默认导出：绿色免安装时导出到 wxemoticon.exe 所在目录下；安装脚本安装（exe 位于 `%LOCALAPPDATA%` 下）时导出到 `~/Downloads`。均可用 `--out-dir` 指定。
+缓存与日志默认写入 `%LOCALAPPDATA%\wxemoticon`，图片默认导出到 `~/Downloads`（可用 `--out-dir` 指定）。
 
 ## Linux CLI（Ubuntu/Debian x86_64）
 

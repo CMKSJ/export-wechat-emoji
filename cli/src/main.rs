@@ -457,51 +457,8 @@ fn xwechat_files_dir(explicit: Option<&str>) -> anyhow::Result<PathBuf> {
     }
 }
 
-#[cfg_attr(target_os = "windows", allow(dead_code))]
 fn downloads_dir() -> anyhow::Result<PathBuf> {
     Ok(home_dir()?.join("Downloads"))
-}
-
-/// 默认导出根目录。
-/// Windows 下：绿色免安装（exe 在普通目录）导出到 exe 所在目录；
-/// 安装态（exe 在 %LOCALAPPDATA% / Program Files 下）导出到 ~/Downloads，与其他平台一致。
-fn default_export_base_dir() -> anyhow::Result<PathBuf> {
-    #[cfg(target_os = "windows")]
-    {
-        let exe = std::env::current_exe().context("获取当前程序路径失败")?;
-        let dir = exe_dir(&exe);
-        if is_installed_location(&dir) {
-            downloads_dir()
-        } else {
-            Ok(dir)
-        }
-    }
-    #[cfg(not(target_os = "windows"))]
-    {
-        downloads_dir()
-    }
-}
-
-#[cfg(target_os = "windows")]
-fn exe_dir(exe: &Path) -> PathBuf {
-    exe.parent()
-        .map(|p| p.to_path_buf())
-        .unwrap_or_else(|| PathBuf::from("."))
-}
-
-/// 判断目录是否位于"安装态"位置（%LOCALAPPDATA%、%PROGRAMFILES% 等之下）。
-#[cfg(target_os = "windows")]
-fn is_installed_location(dir: &Path) -> bool {
-    for key in ["LOCALAPPDATA", "PROGRAMFILES", "PROGRAMFILES(X86)"] {
-        if let Some(base) = std::env::var_os(key) {
-            let dir_lower = dir.to_string_lossy().to_lowercase();
-            let base_lower = PathBuf::from(&base).to_string_lossy().to_lowercase();
-            if dir_lower.starts_with(&format!("{base_lower}\\")) {
-                return true;
-            }
-        }
-    }
-    false
 }
 
 #[cfg(target_os = "macos")]
@@ -1907,7 +1864,7 @@ async fn cmd_export(cli: &Cli, args: &ExportArgs) -> anyhow::Result<()> {
         resolve_user_path(p)?
     } else {
         let ts = chrono_like_timestamp();
-        let default = default_export_base_dir()?.join(format!("微信表情包_导出_{ts}"));
+        let default = downloads_dir()?.join(format!("微信表情包_导出_{ts}"));
         if cli.no_interactive {
             default
         } else {
@@ -2216,6 +2173,7 @@ fn shell_single_quote(input: &str) -> String {
 #[cfg(test)]
 mod cli_tests {
     use super::*;
+    #[cfg(unix)]
     use tempfile::tempdir;
 
     #[test]
@@ -2403,32 +2361,6 @@ mod cli_tests {
         let mut tampered = page;
         tampered[100] ^= 1;
         assert!(decrypt_page_image(&tampered, 1, &key, &mac_key).is_err());
-    }
-
-    #[cfg(target_os = "windows")]
-    #[test]
-    fn windows_export_base_is_exe_directory() {
-        // 绿色态：exe 在 D:\tools\wxemoticon\ 下时，默认导出根目录即该目录。
-        let base = exe_dir(Path::new(r"D:\tools\wxemoticon\wxemoticon.exe"));
-        assert_eq!(base, PathBuf::from(r"D:\tools\wxemoticon"));
-        assert!(!is_installed_location(&base));
-
-        // exe 直接位于盘符根目录时，导出根目录即盘符根。
-        let root = exe_dir(Path::new(r"D:\wxemoticon.exe"));
-        assert_eq!(root, PathBuf::from(r"D:\"));
-    }
-
-    #[cfg(target_os = "windows")]
-    #[test]
-    fn windows_installed_locations_are_recognized() {
-        // 安装态：%LOCALAPPDATA% 与 %PROGRAMFILES% 之下的目录。
-        let local = std::env::var_os("LOCALAPPDATA").expect("LOCALAPPDATA 未设置");
-        let installed = PathBuf::from(&local).join(r"Programs\wxemoticon");
-        assert!(is_installed_location(&installed));
-
-        // 大小写不敏感。
-        let upper = installed.to_string_lossy().to_uppercase();
-        assert!(is_installed_location(Path::new(&upper)));
     }
 
     #[test]
