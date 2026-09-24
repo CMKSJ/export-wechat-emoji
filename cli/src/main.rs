@@ -2149,18 +2149,20 @@ async fn cmd_update(args: &UpdateArgs) -> anyhow::Result<()> {
             .unwrap_or_else(|| "latest".to_string());
 
         let installer_url = format!(
-            "https://raw.githubusercontent.com/{}/main/scripts/install-wxemoticon.ps1",
+            "https://raw.githubusercontent.com/{}/main/scripts/install-wxemoticon.cmd",
             args.repo.trim()
         );
-        let cmdline = format!("irm -UseBasicParsing '{installer_url}' | iex");
+        let cmdline = format!(
+            r#"curl -fsSL {installer_url} -o "%TEMP%\wxemoticon-install.cmd" && "%TEMP%\wxemoticon-install.cmd""#
+        );
 
         if !args.json {
             eprintln!("开始更新 wxemoticon（version: {version}）...");
         }
 
-        let mut command = Command::new("powershell");
+        let mut command = Command::new("cmd");
         command
-            .args(["-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", &cmdline])
+            .args(["/S", "/C", &cmdline])
             .env("WXEMOTICON_REPO", args.repo.trim())
             .env("INSTALL_DIR", install_dir.display().to_string());
         if version != "latest" {

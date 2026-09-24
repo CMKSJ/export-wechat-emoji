@@ -93,13 +93,13 @@ jobs:
             - macOS App（Intel）：wxemoticon-app-macos-x64.dmg
             - CLI：wxemoticon（aarch64 / x86_64）
             - Windows CLI：wxemoticon-x86_64-windows.zip
-            - 安装脚本：install-wxemoticon.sh / install-wxemoticon.ps1
+            - 安装脚本：install-wxemoticon.sh / install-wxemoticon.cmd
 
             CLI 安装（macOS / Linux）：
             curl -fsSL https://raw.githubusercontent.com/liusheng22/export-wechat-emoji/main/scripts/install-wxemoticon.sh | bash
 
-            CLI 安装（Windows，cmd / PowerShell）：
-            powershell -NoProfile -ExecutionPolicy Bypass -Command "irm https://raw.githubusercontent.com/liusheng22/export-wechat-emoji/main/scripts/install-wxemoticon.ps1 | iex"
+            CLI 安装（Windows，cmd）：
+            curl -fsSL https://raw.githubusercontent.com/liusheng22/export-wechat-emoji/main/scripts/install-wxemoticon.cmd -o "%TEMP%\install-wxemoticon.cmd" && "%TEMP%\install-wxemoticon.cmd"
 
             CLI 常用命令：
             - wxemoticon key
@@ -257,7 +257,7 @@ jobs:
           files: |
             wxemoticon-x86_64-windows.zip
             wxemoticon-SHA256SUMS-windows.txt
-            scripts/install-wxemoticon.ps1
+            scripts/install-wxemoticon.cmd
 
   cleanup-release-default-assets:
     needs: publish-tauri

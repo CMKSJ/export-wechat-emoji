@@ -139,10 +139,10 @@ curl -fsSL https://raw.githubusercontent.com/liusheng22/export-wechat-emoji/main
 curl -fsSL https://raw.githubusercontent.com/liusheng22/export-wechat-emoji/main/scripts/install-wxemoticon.sh | env WXEMOTICON_VERSION=v0.3.0 bash
 ```
 
-Windows（cmd / PowerShell 均可）：
+Windows（cmd，需 Windows 10 1803+）：
 
 ```cmd
-powershell -NoProfile -ExecutionPolicy Bypass -Command "irm https://raw.githubusercontent.com/liusheng22/export-wechat-emoji/main/scripts/install-wxemoticon.ps1 | iex"
+curl -fsSL https://raw.githubusercontent.com/liusheng22/export-wechat-emoji/main/scripts/install-wxemoticon.cmd -o "%TEMP%\install-wxemoticon.cmd" && "%TEMP%\install-wxemoticon.cmd"
 ```
 
 安装到 `%LOCALAPPDATA%\Programs\wxemoticon` 并自动加入用户 PATH，新开终端即可使用 `wxemoticon`（设 `WXEMOTICON_NO_PATH_MODIFY=1` 可跳过 PATH 修改）。
@@ -150,7 +150,8 @@ powershell -NoProfile -ExecutionPolicy Bypass -Command "irm https://raw.githubus
 升级到指定版本（例如 `v0.3.0`）：
 
 ```cmd
-powershell -NoProfile -ExecutionPolicy Bypass -Command "$env:WXEMOTICON_VERSION='v0.3.0'; irm https://raw.githubusercontent.com/liusheng22/export-wechat-emoji/main/scripts/install-wxemoticon.ps1 | iex"
+set WXEMOTICON_VERSION=v0.3.0
+curl -fsSL https://raw.githubusercontent.com/liusheng22/export-wechat-emoji/main/scripts/install-wxemoticon.cmd -o "%TEMP%\install-wxemoticon.cmd" && "%TEMP%\install-wxemoticon.cmd"
 ```
 
 安装方式 B：Homebrew（推荐长期维护，仅 macOS）
