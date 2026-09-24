@@ -50,7 +50,7 @@ wxemoticon `
   export
 ```
 
-缓存与日志默认写入 `%LOCALAPPDATA%\wxemoticon`，图片默认导出到 wxemoticon.exe 所在目录下的 `微信表情包_导出_<时间戳>`（可用 `--out-dir` 指定）。
+缓存与日志默认写入 `%LOCALAPPDATA%\wxemoticon`。图片默认导出：绿色免安装时导出到 wxemoticon.exe 所在目录下；安装脚本安装（exe 位于 `%LOCALAPPDATA%` 下）时导出到 `~/Downloads`。均可用 `--out-dir` 指定。
 
 ## Linux CLI（Ubuntu/Debian x86_64）
 
@@ -177,7 +177,7 @@ wxemoticon --version
 wxemoticon --help
 ```
 
-如果提示找不到命令，可把 `~/.local/bin` 加入 PATH（zsh）：
+如果提示找不到命令，可把 `~/.local/bin` 加入 PATH（zsh；Windows 安装脚本会自动配置用户 PATH，无需手动处理）：
 
 ```bash
 echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.zshrc
