@@ -45,6 +45,19 @@ jobs:
       - name: install Rust stable
         uses: dtolnay/rust-toolchain@stable
 
+      # 强推 tag 重发版时，先删除该 tag 的旧 release（保留 tag 本身），
+      # 避免新旧资产混杂/上传冲突；仅首个串行矩阵分支执行一次。
+      - name: reset existing release for this tag
+        if: matrix.build_cli
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="${GITHUB_REF_NAME}"
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "deleting existing release $TAG (assets will be republished by this run)"
+            gh release delete "$TAG" --yes
+          fi
+
       - name: add Rust targets
         run: rustup target add aarch64-apple-darwin x86_64-apple-darwin
 
