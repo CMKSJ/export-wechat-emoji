@@ -836,16 +836,11 @@ fn select_account(
     }
 
     eprintln!("检测到 {} 个账号，请选择：", accounts.len());
-    for (i, a) in accounts.iter().enumerate() {
-        eprintln!(
-            "  {}) {}（emoticon.db 更新：{}）",
-            i + 1,
-            a.wxid,
-            format_mtime(a.emoticon_db_mtime)
-        );
-    }
-
-    let items: Vec<&str> = accounts.iter().map(|a| a.wxid.as_str()).collect();
+    let labels: Vec<String> = accounts
+        .iter()
+        .map(|a| format!("{}（emoticon.db 更新：{}）", a.wxid, format_mtime(a.emoticon_db_mtime)))
+        .collect();
+    let items: Vec<&str> = labels.iter().map(|s| s.as_str()).collect();
     let idx = choose_numbered("请输入账号序号", &items, 0)?;
     Ok(accounts[idx].clone())
 }
