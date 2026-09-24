@@ -459,7 +459,42 @@ fn xwechat_files_dir(explicit: Option<&str>) -> anyhow::Result<PathBuf> {
 }
 
 fn downloads_dir() -> anyhow::Result<PathBuf> {
+    #[cfg(target_os = "windows")]
+    {
+        // Windows 的"下载"文件夹可能被用户/OneDrive 重定向，优先取系统真实路径。
+        if let Some(dir) = shell_downloads_dir() {
+            return Ok(dir);
+        }
+    }
     Ok(home_dir()?.join("Downloads"))
+}
+
+#[cfg(target_os = "windows")]
+fn shell_downloads_dir() -> Option<PathBuf> {
+    use std::ffi::c_void;
+    use windows_sys::Win32::UI::Shell::{SHGetKnownFolderPath, FOLDERID_Downloads};
+
+    unsafe {
+        let mut path_ptr: *mut u16 = std::ptr::null_mut();
+        let hr = SHGetKnownFolderPath(
+            &FOLDERID_Downloads,
+            0, // KF_FLAG_DEFAULT
+            std::ptr::null_mut(),
+            &mut path_ptr,
+        );
+        if hr != 0 || path_ptr.is_null() {
+            return None;
+        }
+        let mut len = 0usize;
+        while *path_ptr.add(len) != 0 {
+            len += 1;
+        }
+        let wide = std::slice::from_raw_parts(path_ptr, len);
+        let path = String::from_utf16_lossy(wide);
+        windows_sys::Win32::System::Com::CoTaskMemFree(path_ptr as *const c_void);
+        let dir = PathBuf::from(path);
+        dir.is_dir().then_some(dir)
+    }
 }
 
 #[cfg(target_os = "macos")]
@@ -2362,6 +2397,22 @@ mod cli_tests {
         let mut tampered = page;
         tampered[100] ^= 1;
         assert!(decrypt_page_image(&tampered, 1, &key, &mac_key).is_err());
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn windows_downloads_dir_follows_shell_redirection() {
+        // 重定向存在时（如 OneDrive），必须返回系统真实"下载"目录且真实存在。
+        if let Some(dir) = shell_downloads_dir() {
+            assert!(dir.is_dir(), "shell 下载目录应存在：{}", dir.display());
+            assert_eq!(downloads_dir().unwrap(), dir);
+        } else {
+            // 无重定向时退回 ~/Downloads。
+            assert_eq!(
+                downloads_dir().unwrap(),
+                home_dir().unwrap().join("Downloads")
+            );
+        }
     }
 
     #[test]

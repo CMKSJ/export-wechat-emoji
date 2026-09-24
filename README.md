@@ -50,7 +50,7 @@ wxemoticon `
   export
 ```
 
-缓存与日志默认写入 `%LOCALAPPDATA%\wxemoticon`，图片默认导出到 `~/Downloads`（可用 `--out-dir` 指定）。
+缓存与日志默认写入 `%LOCALAPPDATA%\wxemoticon`，图片默认导出到系统"下载"文件夹（自动跟随 Windows 重定向设置，如 OneDrive 路径；可用 `--out-dir` 指定）。
 
 ## Linux CLI（Ubuntu/Debian x86_64）
 
