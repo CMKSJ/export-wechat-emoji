@@ -152,7 +152,7 @@ jobs:
           cargo build --manifest-path cli/Cargo.toml --release --target x86_64-apple-darwin
           tar -czf wxemoticon-aarch64-apple-darwin.tar.gz -C cli/target/release wxemoticon
           tar -czf wxemoticon-x86_64-apple-darwin.tar.gz -C cli/target/x86_64-apple-darwin/release wxemoticon
-          shasum -a 256 wxemoticon-*.tar.gz > wxemoticon-SHA256SUMS.txt
+          shasum -a 256 wxemoticon-*.tar.gz > wxemoticon-SHA256SUMS-macos.txt
 
       - name: upload wxemoticon cli assets
         if: matrix.build_cli
@@ -163,7 +163,7 @@ jobs:
           files: |
             wxemoticon-aarch64-apple-darwin.tar.gz
             wxemoticon-x86_64-apple-darwin.tar.gz
-            wxemoticon-SHA256SUMS.txt
+            wxemoticon-SHA256SUMS-macos.txt
             scripts/install-wxemoticon.sh
 
       - name: publish Homebrew formula to tap repo
@@ -181,11 +181,11 @@ jobs:
 
           TAG="${GITHUB_REF_NAME}"
           REPO="${GITHUB_REPOSITORY}"
-          ARM_SHA="$(awk '/wxemoticon-aarch64-apple-darwin.tar.gz/{print $1}' wxemoticon-SHA256SUMS.txt)"
-          X64_SHA="$(awk '/wxemoticon-x86_64-apple-darwin.tar.gz/{print $1}' wxemoticon-SHA256SUMS.txt)"
+          ARM_SHA="$(awk '/wxemoticon-aarch64-apple-darwin.tar.gz/{print $1}' wxemoticon-SHA256SUMS-macos.txt)"
+          X64_SHA="$(awk '/wxemoticon-x86_64-apple-darwin.tar.gz/{print $1}' wxemoticon-SHA256SUMS-macos.txt)"
 
           if [[ -z "${ARM_SHA}" || -z "${X64_SHA}" ]]; then
-            echo "failed to parse CLI checksums from wxemoticon-SHA256SUMS.txt" >&2
+            echo "failed to parse CLI checksums from wxemoticon-SHA256SUMS-macos.txt" >&2
             exit 1
           fi
 
