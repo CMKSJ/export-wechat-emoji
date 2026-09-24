@@ -69,7 +69,8 @@ struct Cli {
     )]
     wechat_app: String,
 
-    /// xwechat_files 数据目录；Linux 会自动检测 ~/Documents 和 ~/文档
+    /// xwechat_files 数据目录；未指定时按平台自动检测
+    /// （macOS 微信容器，Linux ~/Documents 与 ~/文档，Windows %USERPROFILE%\xwechat_files）
     #[arg(long, global = true)]
     wechat_data_dir: Option<String>,
 
@@ -102,7 +103,7 @@ struct KeyArgs {
     #[arg(long)]
     wxid: Option<String>,
 
-    /// 输出 key 文件路径（默认写到微信容器 Documents/export-wechat-emoji）
+    /// 输出 key 文件路径（默认写入各平台缓存目录）
     #[arg(long)]
     out: Option<String>,
 
@@ -118,7 +119,7 @@ struct KeyArgs {
     #[arg(long, default_value_t = 600)]
     timeout: u64,
 
-    /// 在 Finder 中打开（定位）输出文件
+    /// 在文件管理器中打开（定位）输出文件
     #[arg(long)]
     open: bool,
 
@@ -161,7 +162,7 @@ struct UrlsArgs {
     #[arg(long)]
     print: bool,
 
-    /// 在 Finder 中打开（定位）输出文件
+    /// 在文件管理器中打开（定位）输出文件
     #[arg(long)]
     open: bool,
 
@@ -223,7 +224,7 @@ struct UpdateArgs {
     #[arg(long)]
     version: Option<String>,
 
-    /// 安装目录，默认 ~/.local/bin
+    /// 安装目录（macOS 默认 ~/.local/bin，Windows 默认 %LOCALAPPDATA%\Programs\wxemoticon）
     #[arg(long)]
     install_dir: Option<String>,
 

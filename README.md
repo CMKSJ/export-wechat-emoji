@@ -266,19 +266,19 @@ wxemoticon --wechat-app "$WECHAT_APP" export
 ### 关键参数说明
 
 - 全局参数：
-  - `--wechat-app`：指定微信路径，默认 `/Applications/WeChat.app`
+  - `--wechat-app`：指定微信路径（默认：macOS `/Applications/WeChat.app`，Linux `/opt/wechat/wechat`，Windows 自动检测）
   - `--no-interactive`：关闭交互（适合脚本化）
 - `key` 常用参数：
   - `--force`：忽略已有 key，强制重抓
   - `--timeout`：抓 key 超时时间（秒）
-  - `--open`：在 Finder 定位 key 文件
+  - `--open`：在文件管理器中定位 key 文件
   - `--json`：以 JSON 输出结果
 - `urls` 常用参数：
   - `--list-accounts`：仅列账号并退出
   - `--print`：打印全部 URL 到终端
   - `--out`：自定义 URL 输出文件
   - `--force-key`：忽略已有 key 并重抓
-  - `--open`：在 Finder 定位 URL 文件
+  - `--open`：在文件管理器中定位 URL 文件
   - `--json`：以 JSON 输出结果
 - `export` 常用参数：
   - `--flat`：不分组导出
