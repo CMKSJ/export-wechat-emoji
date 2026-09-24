@@ -24,8 +24,13 @@ use windows_sys::Win32::System::Memory::{
     PAGE_EXECUTE_READWRITE, PAGE_EXECUTE_WRITECOPY, PAGE_GUARD, PAGE_READONLY, PAGE_READWRITE,
     PAGE_WRITECOPY,
 };
+use windows_sys::Win32::System::Registry::{
+    RegCloseKey, RegOpenKeyExW, RegQueryValueExW, HKEY, HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE,
+    KEY_READ, REG_SZ,
+};
 use windows_sys::Win32::System::Threading::{
-    OpenProcess, PROCESS_QUERY_INFORMATION, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_VM_READ,
+    OpenProcess, QueryFullProcessImageNameW, PROCESS_QUERY_INFORMATION,
+    PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_VM_READ,
 };
 
 use crate::keyscan::{extract_key_candidates, read_database_page, verify_raw_key};
@@ -656,6 +661,11 @@ pub(crate) fn dump_db_key(
         if launched.is_none() {
             if pids.is_empty() {
                 if !wechat_bin.is_file() {
+                    if wechat_bin.as_os_str().is_empty() {
+                        return Err(anyhow!(
+                            "未检测到运行中的微信，且自动检测微信程序失败（已尝试运行进程/注册表 App Paths/Program Files）；请用 --wechat-bin 指定 Weixin.exe/WeChat.exe 路径"
+                        ));
+                    }
                     return Err(anyhow!(
                         "未找到微信程序：{}（可用 --wechat-bin 指定 Weixin.exe/WeChat.exe 路径）",
                         wechat_bin.display()
@@ -701,22 +711,90 @@ pub(crate) fn dump_db_key(
     ))
 }
 
-pub(crate) fn discover_wechat_bin() -> anyhow::Result<PathBuf> {
-    let mut candidates = Vec::new();
+/// 从注册表 App Paths 读取 exe 完整路径（ShellExecute 同款机制）。
+fn registry_app_path(exe_name: &str) -> Option<PathBuf> {
+    let subkey: Vec<u16> = format!(
+        "SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\App Paths\\{exe_name}\0"
+    )
+    .encode_utf16()
+    .collect();
+    for root in [HKEY_LOCAL_MACHINE, HKEY_CURRENT_USER] {
+        unsafe {
+            let mut hkey: HKEY = std::ptr::null_mut();
+            if RegOpenKeyExW(root, subkey.as_ptr(), 0, KEY_READ, &mut hkey) != 0 {
+                continue;
+            }
+            let mut buf = [0u16; 512];
+            let mut byte_len = (buf.len() * 2) as u32;
+            let mut value_type = 0u32;
+            let ok = RegQueryValueExW(
+                hkey,
+                std::ptr::null(),
+                std::ptr::null_mut(),
+                &mut value_type,
+                buf.as_mut_ptr() as *mut u8,
+                &mut byte_len,
+            );
+            RegCloseKey(hkey);
+            if ok == 0 && value_type == REG_SZ {
+                let chars = byte_len as usize / 2;
+                let text = String::from_utf16_lossy(&buf[..chars.min(buf.len())]);
+                let text = text.trim_end_matches('\0').trim();
+                // App Paths 里可能带引号包裹。
+                let text = text.trim_matches('"');
+                let path = PathBuf::from(text);
+                if path.is_file() {
+                    return Some(path);
+                }
+            }
+        }
+    }
+    None
+}
+
+/// 运行中的微信主进程镜像路径（最可靠：无论装在哪都能拿到）。
+fn running_wechat_bin() -> Option<PathBuf> {
+    let processes = snapshot_processes();
+    let entry = processes
+        .iter()
+        .find(|p| p.name.eq_ignore_ascii_case("weixin.exe"))
+        .or_else(|| processes.iter().find(|p| p.name.eq_ignore_ascii_case("wechat.exe")))?;
+    let handle = open_process_for_read(entry.pid).ok()?;
+    let _guard = HandleGuard(handle);
+    let mut buf = [0u16; 1024];
+    let mut size = buf.len() as u32;
+    let ok = unsafe { QueryFullProcessImageNameW(handle, 0, buf.as_mut_ptr(), &mut size) };
+    if ok == 0 {
+        return None;
+    }
+    let path = PathBuf::from(String::from_utf16_lossy(&buf[..size as usize]));
+    path.is_file().then_some(path)
+}
+
+pub(crate) fn discover_wechat_bin() -> Option<PathBuf> {
+    // 1) 运行中的微信进程镜像路径。
+    if let Some(path) = running_wechat_bin() {
+        return Some(path);
+    }
+    // 2) 注册表 App Paths（HKLM/HKCU，兼容每用户安装与自定义安装位置）。
+    for exe_name in ["Weixin.exe", "WeChat.exe"] {
+        if let Some(path) = registry_app_path(exe_name) {
+            return Some(path);
+        }
+    }
+    // 3) Program Files 常规位置（微信 4.x 官方名为 Weixin；保留旧版 WeChat 兼容）。
     for env_key in ["ProgramFiles", "ProgramFiles(x86)"] {
         if let Some(program_files) = std::env::var_os(env_key) {
             let program_files = PathBuf::from(&program_files);
-            // 微信 4.x 官方名为 Weixin；保留旧版 WeChat 目录作为兼容。
-            candidates.push(program_files.join("Tencent/Weixin/Weixin.exe"));
-            candidates.push(program_files.join("Tencent/WeChat/WeChat.exe"));
+            for rel in ["Tencent/Weixin/Weixin.exe", "Tencent/WeChat/WeChat.exe"] {
+                let path = program_files.join(rel);
+                if path.is_file() {
+                    return Some(path);
+                }
+            }
         }
     }
-    candidates
-        .into_iter()
-        .find(|path| path.is_file())
-        .with_context(|| {
-            "未找到 Windows 微信程序；请用 --wechat-bin 指定 Weixin.exe/WeChat.exe 路径".to_string()
-        })
+    None
 }
 
 fn discover_data_root_with_candidates(

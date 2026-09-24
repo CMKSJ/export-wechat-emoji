@@ -2425,7 +2425,9 @@ fn resolve_wechat_app(input: &str) -> anyhow::Result<PathBuf> {
     {
         let resolved = resolve_user_path(input)?;
         if resolved.as_os_str().is_empty() {
-            return windows::discover_wechat_bin();
+            // 检测不到也不在此报错：微信正在运行时用不到程序路径，
+            // 推迟到真正需要拉起临时实例时才校验（见 windows::dump_db_key）。
+            return Ok(windows::discover_wechat_bin().unwrap_or_default());
         }
         return Ok(resolved);
     }

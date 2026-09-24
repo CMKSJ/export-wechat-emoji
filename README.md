@@ -16,7 +16,7 @@
 
 ## Windows CLI
 
-已适配 Windows 微信 4.x（默认程序 `C:\Program Files\Tencent\Weixin\Weixin.exe`，默认数据目录 `%USERPROFILE%\xwechat_files`）。
+已适配 Windows 微信 4.x（自动检测微信程序：运行中的进程 → 注册表 App Paths → Program Files 常规位置；默认数据目录 `%USERPROFILE%\xwechat_files`）。
 
 微信正在运行并已登录时可直接导出，无需退出微信；未运行时会启动一次临时微信实例，需要重新抓 key 时会提示先登录并打开一次表情面板。
 
