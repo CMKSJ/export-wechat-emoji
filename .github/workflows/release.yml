@@ -70,6 +70,21 @@ jobs:
           pnpm store prune
           pnpm install --no-frozen-lockfile
 
+      # 重发布时仅清理本流水线会重新生成的临时资产（"_" 前缀的 tauri 默认命名，
+      # 成功后 cleanup job 也会删除它们）；正式资产保留、由各上传步骤按名 --clobber
+      # 替换，构建失败时已有发布资产仍可下载。tauri-action 上传同名资产不覆盖，
+      # 不清理会报 already_exists 422。
+      - name: drop stale default-named app assets
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          TAG="${GITHUB_REF_NAME}"
+          for ID in $(gh release view "$TAG" --json assets --jq '.assets[] | select(.name | startswith("_")) | .id' 2>/dev/null || true); do
+            echo "deleting stale asset id=$ID"
+            gh api -X DELETE "repos/${GITHUB_REPOSITORY}/releases/assets/${ID}" || true
+          done
+
       - uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
