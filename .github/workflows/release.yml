@@ -250,6 +250,8 @@ jobs:
       - name: upload wxemoticon windows cli assets
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        # Windows runner 的 run 默认是 PowerShell；本步骤是 bash 语法
+        shell: bash
         run: |
           TAG="${GITHUB_REF_NAME}"
           gh release upload "$TAG" \
