@@ -176,9 +176,11 @@ fn is_readable_protection(protect: u32) -> bool {
 
 /// 逐块读取进程可读区域，块间保留 `carry` 字节重叠，`visit(base, data)` 的 `base`
 /// 是 `data[0]` 的绝对地址（含上一块尾部重叠，调用方需用 HashSet 去重绝对地址）。
+/// visit 返回 false 表示提前终止；到达 deadline 后立即停止读取。
 fn visit_readable_chunks(
     handle: HANDLE,
-    mut visit: impl FnMut(usize, &[u8]),
+    deadline: Instant,
+    mut visit: impl FnMut(usize, &[u8]) -> bool,
     carry: usize,
 ) -> anyhow::Result<()> {
     let mut buffer = vec![0u8; CHUNK_SIZE];
@@ -186,6 +188,9 @@ fn visit_readable_chunks(
     let mut pending: Vec<u8> = Vec::new();
     let mut pending_base: usize = 0;
     while address <= MAX_USER_ADDRESS {
+        if Instant::now() >= deadline {
+            return Ok(());
+        }
         let mut info: MEMORY_BASIC_INFORMATION = unsafe { std::mem::zeroed() };
         let queried = unsafe {
             VirtualQueryEx(
@@ -207,6 +212,9 @@ fn visit_readable_chunks(
             let end = (base + size).min(MAX_USER_ADDRESS + 1);
             let mut offset = base;
             while offset < end {
+                if Instant::now() >= deadline {
+                    return Ok(());
+                }
                 let wanted = (end - offset).min(buffer.len());
                 let mut read = 0usize;
                 let ok = unsafe {
@@ -225,7 +233,9 @@ fn visit_readable_chunks(
                     pending_base = offset;
                 }
                 pending.extend_from_slice(&buffer[..read]);
-                visit(pending_base, &pending);
+                if !visit(pending_base, &pending) {
+                    return Ok(());
+                }
                 // 保留尾部用于跨块模式匹配。
                 if pending.len() > carry {
                     let drop = pending.len() - carry;
@@ -339,21 +349,27 @@ fn scan_process_for_config_cipher_key(
 
     // Pass 1: 找到 Config.Cipher 名字字符串的所有地址。
     let mut needle_addresses: HashSet<u64> = HashSet::new();
-    visit_readable_chunks(handle, |_base, data| {
-        if data.len() < CONFIG_CIPHER_NAME.len() {
-            return;
-        }
-        let mut pos = data
-            .windows(CONFIG_CIPHER_NAME.len())
-            .position(|w| w == CONFIG_CIPHER_NAME);
-        while let Some(p) = pos {
-            needle_addresses.insert((_base + p) as u64);
-            pos = data[p + 1..]
+    visit_readable_chunks(
+        handle,
+        deadline,
+        |_base, data| {
+            if data.len() < CONFIG_CIPHER_NAME.len() {
+                return true;
+            }
+            let mut pos = data
                 .windows(CONFIG_CIPHER_NAME.len())
-                .position(|w| w == CONFIG_CIPHER_NAME)
-                .map(|rp| p + 1 + rp);
-        }
-    }, CONFIG_CIPHER_NAME.len() - 1)?;
+                .position(|w| w == CONFIG_CIPHER_NAME);
+            while let Some(p) = pos {
+                needle_addresses.insert((_base + p) as u64);
+                pos = data[p + 1..]
+                    .windows(CONFIG_CIPHER_NAME.len())
+                    .position(|w| w == CONFIG_CIPHER_NAME)
+                    .map(|rp| p + 1 + rp);
+            }
+            true
+        },
+        CONFIG_CIPHER_NAME.len() - 1,
+    )?;
     if needle_addresses.is_empty() {
         return Ok(None);
     }
@@ -361,57 +377,63 @@ fn scan_process_for_config_cipher_key(
     // Pass 2: 找 {ptr, len} 引用结构，追踪到 config 对象与 key blob。
     let mut seen_blobs: HashSet<Vec<u8>> = HashSet::new();
     let mut found: Option<[u8; 32]> = None;
-    visit_readable_chunks(handle, |base, data| {
-        if found.is_some() || data.len() < 16 {
-            return;
-        }
-        for off in 0..=data.len() - 16 {
-            let ptr = remote_u64(data, off);
-            if !needle_addresses.contains(&ptr) {
-                continue;
+    visit_readable_chunks(
+        handle,
+        deadline,
+        |base, data| {
+            if found.is_some() || data.len() < 16 {
+                // 已找到 key（或数据不足）：提前终止，不再读取剩余内存。
+                return false;
             }
-            if remote_u64(data, off + 8) != CONFIG_CIPHER_NAME.len() as u64 {
-                continue;
+            for off in 0..=data.len() - 16 {
+                let ptr = remote_u64(data, off);
+                if !needle_addresses.contains(&ptr) {
+                    continue;
+                }
+                if remote_u64(data, off + 8) != CONFIG_CIPHER_NAME.len() as u64 {
+                    continue;
+                }
+                let qaddr = base + off;
+                let Some(node) = read_remote(handle, qaddr.saturating_sub(0x10), 0x50) else {
+                    continue;
+                };
+                if remote_u64(&node, 0x18) != CONFIG_CIPHER_NAME.len() as u64 {
+                    continue;
+                }
+                let config_ptr = remote_u64(&node, 0x28) as usize;
+                if !(0x10000..MAX_USER_ADDRESS).contains(&config_ptr) {
+                    continue;
+                }
+                let Some(obj) = read_remote(handle, config_ptr + 0x88, 0x28) else {
+                    continue;
+                };
+                let data_ptr = remote_u64(&obj, 0x8) as usize;
+                let data_len = remote_u64(&obj, 0x10) as usize;
+                if data_len == 0 || data_len > CONFIG_CIPHER_BLOB_MAX
+                    || !(0x10000..MAX_USER_ADDRESS).contains(&data_ptr)
+                {
+                    continue;
+                }
+                let Some(blob) = read_remote(handle, data_ptr, data_len) else {
+                    continue;
+                };
+                if !seen_blobs.insert(blob.clone()) {
+                    continue;
+                }
+                let decoded: Vec<u8> = blob
+                    .iter()
+                    .enumerate()
+                    .map(|(i, b)| b ^ CONFIG_CIPHER_XOR_MASK[i % CONFIG_CIPHER_XOR_MASK.len()])
+                    .collect();
+                if let Some(key) = key_from_cipher_blob(&decoded, page, target_salt) {
+                    found = Some(key);
+                    return false;
+                }
             }
-            let qaddr = base + off;
-            let Some(node) = read_remote(handle, qaddr.saturating_sub(0x10), 0x50) else {
-                continue;
-            };
-            if remote_u64(&node, 0x18) != CONFIG_CIPHER_NAME.len() as u64 {
-                continue;
-            }
-            let config_ptr = remote_u64(&node, 0x28) as usize;
-            if !(0x10000..MAX_USER_ADDRESS).contains(&config_ptr) {
-                continue;
-            }
-            let Some(obj) = read_remote(handle, config_ptr + 0x88, 0x28) else {
-                continue;
-            };
-            let data_ptr = remote_u64(&obj, 0x8) as usize;
-            let data_len = remote_u64(&obj, 0x10) as usize;
-            if data_len == 0 || data_len > CONFIG_CIPHER_BLOB_MAX
-                || !(0x10000..MAX_USER_ADDRESS).contains(&data_ptr)
-            {
-                continue;
-            }
-            let Some(blob) = read_remote(handle, data_ptr, data_len) else {
-                continue;
-            };
-            if !seen_blobs.insert(blob.clone()) {
-                continue;
-            }
-            let decoded: Vec<u8> = blob
-                .iter()
-                .enumerate()
-                .map(|(i, b)| b ^ CONFIG_CIPHER_XOR_MASK[i % CONFIG_CIPHER_XOR_MASK.len()])
-                .collect();
-            if let Some(key) = key_from_cipher_blob(&decoded, page, target_salt) {
-                found = Some(key);
-                return;
-            }
-        }
-    }, 16)?;
-    let _ = deadline;
+            true
+        },
+        16,
+    )?;
     Ok(found)
 }
 
@@ -941,6 +963,42 @@ mod tests {
                 .to_ascii_lowercase();
             assert!(name == "weixin.exe" || name == "wechat.exe");
         }
+    }
+
+    #[test]
+    fn chunk_visitor_stops_early_and_respects_deadline() {
+        // 用自身进程验证遍历契约：visitor 返回 false 立即停止；
+        // deadline 已过期时不产生任何 visit 调用。
+        let pid = std::process::id();
+        let handle = unsafe { OpenProcess(PROCESS_QUERY_INFORMATION | PROCESS_VM_READ, 0, pid) };
+        assert!(!is_invalid_handle(handle));
+        let _guard = HandleGuard(handle);
+
+        let mut calls = 0usize;
+        visit_readable_chunks(
+            handle,
+            Instant::now() + Duration::from_secs(30),
+            |_base, _data| {
+                calls += 1;
+                false // 第一次调用即终止
+            },
+            16,
+        )
+        .unwrap();
+        assert_eq!(calls, 1, "visitor 返回 false 后必须立即停止遍历");
+
+        let mut expired_calls = 0usize;
+        visit_readable_chunks(
+            handle,
+            Instant::now() - Duration::from_secs(1), // 已过期
+            |_base, _data| {
+                expired_calls += 1;
+                true
+            },
+            16,
+        )
+        .unwrap();
+        assert_eq!(expired_calls, 0, "deadline 已过期时不应有任何读取");
     }
 
     #[test]
