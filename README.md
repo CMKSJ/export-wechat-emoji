@@ -145,7 +145,7 @@ Windows（cmd，需 Windows 10 1803+）：
 curl -fsSL https://raw.githubusercontent.com/liusheng22/export-wechat-emoji/main/scripts/install-wxemoticon.cmd -o "%TEMP%\install-wxemoticon.cmd" && "%TEMP%\install-wxemoticon.cmd"
 ```
 
-安装到 `%LOCALAPPDATA%\Programs\wxemoticon` 并自动加入用户 PATH，新开终端即可使用 `wxemoticon`（设 `WXEMOTICON_NO_PATH_MODIFY=1` 可跳过 PATH 修改）。
+安装到 `%LOCALAPPDATA%\Programs\wxemoticon` 并自动加入用户 PATH，新开终端即可使用 `wxemoticon`（设 `WXEMOTICON_NO_PATH_MODIFY=1` 可跳过 PATH 修改）。网络受限环境可先 `set WXEMOTICON_DOWNLOAD_BASE=https://gh-proxy.com/https://github.com` 再执行安装命令（镜像下载）。
 
 升级到指定版本（例如 `v0.3.0`）：
 
