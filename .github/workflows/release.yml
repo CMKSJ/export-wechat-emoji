@@ -6,6 +6,13 @@ on:
     tags:
       - 'v*' # 监听所有以 v 开头的 tag（如 v0.1.2）
 
+# 同一 tag 重推（强推重发版）时取消旧的运行，避免并发写同一个 release；
+# 资产更新靠各上传步骤的同名覆盖（--clobber / action-gh-release）完成，
+# 不删除 release 本身，构建失败时已有资产仍可下载。
+concurrency:
+  group: release-${{ github.ref_name }}
+  cancel-in-progress: true
+
 jobs:
   publish-tauri:
     permissions:
@@ -44,19 +51,6 @@ jobs:
 
       - name: install Rust stable
         uses: dtolnay/rust-toolchain@stable
-
-      # 强推 tag 重发版时，先删除该 tag 的旧 release（保留 tag 本身），
-      # 避免新旧资产混杂/上传冲突；仅首个串行矩阵分支执行一次。
-      - name: reset existing release for this tag
-        if: matrix.build_cli
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          TAG="${GITHUB_REF_NAME}"
-          if gh release view "$TAG" >/dev/null 2>&1; then
-            echo "deleting existing release $TAG (assets will be republished by this run)"
-            gh release delete "$TAG" --yes
-          fi
 
       - name: add Rust targets
         run: rustup target add aarch64-apple-darwin x86_64-apple-darwin
