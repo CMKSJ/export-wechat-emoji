@@ -1175,7 +1175,32 @@ fn decrypt_page_image(
 
 /// 解析 WAL 文件，返回（已提交帧：页号 -> WAL 内数据偏移，最终数据库页数）。
 /// 只保留最后一次 commit 之前的帧；之后的未提交帧忽略。
-fn collect_wal_committed_frames(wal: &[u8]) -> Option<(std::collections::HashMap<u32, usize>, u32)> {
+/// SQLite WAL 校验和（walChecksum 算法）：按 32 位字对累加，字节序由文件 magic 决定。
+fn wal_checksum(data: &[u8], mut s0: u32, mut s1: u32, big_endian: bool) -> (u32, u32) {
+    let read_u32 = |b: &[u8]| -> u32 {
+        if big_endian {
+            u32::from_be_bytes([b[0], b[1], b[2], b[3]])
+        } else {
+            u32::from_le_bytes([b[0], b[1], b[2], b[3]])
+        }
+    };
+    for pair in data.chunks_exact(8) {
+        s0 = s0.wrapping_add(read_u32(&pair[0..4])).wrapping_add(s1);
+        s1 = s1.wrapping_add(read_u32(&pair[4..8])).wrapping_add(s0);
+    }
+    (s0, s1)
+}
+
+/// 一次已提交事务：本事务写入的页（页号 + WAL 内数据偏移）与提交后的库页数。
+struct WalTransaction {
+    pages: Vec<(u32, usize)>,
+    db_size_after: u32,
+}
+
+/// 解析 WAL：校验头部与逐帧链式校验和，返回校验通过前缀内的已提交事务。
+/// 校验和链断裂处之后的帧视为未提交并丢弃（与 SQLite 自身恢复语义一致：
+/// 只重放有效前缀里的完整事务，不会出现"半个事务"被应用的情况）。
+fn collect_wal_transactions(wal: &[u8]) -> Option<Vec<WalTransaction>> {
     const WAL_HEADER_SIZE: usize = 32;
     const WAL_FRAME_HEADER_SIZE: usize = 24;
     const PAGE_SIZE: usize = 4096;
@@ -1184,41 +1209,77 @@ fn collect_wal_committed_frames(wal: &[u8]) -> Option<(std::collections::HashMap
         return None;
     }
     let magic = u32::from_be_bytes(wal[0..4].try_into().ok()?);
-    if magic != 0x377F_0682 && magic != 0x377F_0683 {
-        return None;
-    }
+    let big_endian = match magic {
+        0x377F_0682 => false,
+        0x377F_0683 => true,
+        _ => return None,
+    };
     let page_size = u32::from_be_bytes(wal[8..12].try_into().ok()?) as usize;
     if page_size != PAGE_SIZE {
         return None;
     }
+    // 校验和存储字节序由 magic 决定（页号等字段恒为大端）。
+    let read_cksum = |b: &[u8]| -> u32 {
+        if big_endian {
+            u32::from_be_bytes([b[0], b[1], b[2], b[3]])
+        } else {
+            u32::from_le_bytes([b[0], b[1], b[2], b[3]])
+        }
+    };
+    // 头部校验和覆盖前 24 字节，初值 (0, 0)。
+    let stored_h0 = read_cksum(&wal[24..28]);
+    let stored_h1 = read_cksum(&wal[28..32]);
+    if wal_checksum(&wal[..24], 0, 0, big_endian) != (stored_h0, stored_h1) {
+        return None;
+    }
     let header_salt = &wal[16..24];
 
-    let mut committed = std::collections::HashMap::<u32, usize>::new();
-    let mut pending = Vec::<(u32, usize)>::new();
-    let mut final_pages = 0u32;
+    let mut chain = (stored_h0, stored_h1);
+    let mut transactions: Vec<WalTransaction> = Vec::new();
+    let mut pending: Vec<(u32, usize)> = Vec::new();
     let mut offset = WAL_HEADER_SIZE;
     while offset + WAL_FRAME_HEADER_SIZE + PAGE_SIZE <= wal.len() {
         let page_no = u32::from_be_bytes(wal[offset..offset + 4].try_into().ok()?);
         let db_size_after = u32::from_be_bytes(wal[offset + 4..offset + 8].try_into().ok()?);
         let frame_salt = &wal[offset + 8..offset + 16];
-        // salt 不匹配说明是 checkpoint 之后的旧帧，直接停止。
+        // salt 不匹配说明是 checkpoint 之后的旧帧，校验和链在此断裂。
         if frame_salt != header_salt || page_no == 0 {
             break;
         }
+        // 帧校验和：帧头前 8 字节 + 页数据，链式承接上一帧（首帧承接头部）。
+        let stored_c0 = read_cksum(&wal[offset + 16..offset + 20]);
+        let stored_c1 = read_cksum(&wal[offset + 20..offset + 24]);
+        let (mid0, mid1) = wal_checksum(
+            &wal[offset..offset + 8],
+            chain.0,
+            chain.1,
+            big_endian,
+        );
+        let checksum = wal_checksum(
+            &wal[offset + WAL_FRAME_HEADER_SIZE..offset + WAL_FRAME_HEADER_SIZE + PAGE_SIZE],
+            mid0,
+            mid1,
+            big_endian,
+        );
+        if checksum != (stored_c0, stored_c1) {
+            break;
+        }
+        chain = (stored_c0, stored_c1);
+
         pending.push((page_no, offset + WAL_FRAME_HEADER_SIZE));
         if db_size_after != 0 {
-            for (p, o) in pending.drain(..) {
-                committed.insert(p, o);
-            }
-            final_pages = db_size_after;
+            transactions.push(WalTransaction {
+                pages: std::mem::take(&mut pending),
+                db_size_after,
+            });
         }
         offset += WAL_FRAME_HEADER_SIZE + PAGE_SIZE;
     }
 
-    if final_pages == 0 {
+    if transactions.is_empty() {
         return None;
     }
-    Some((committed, final_pages))
+    Some(transactions)
 }
 
 fn decrypt_db_file_v4_with_key(
@@ -1270,36 +1331,49 @@ fn decrypt_db_file_v4_with_key(
         pages.push(plain);
     }
 
-    // 微信运行时，最近的变更可能仍在 WAL 中；把已提交的 WAL 帧合并进来，
-    // 否则解密主库会漏掉新增/更新的表情记录。
+    // 微信运行时，最近的变更可能仍在 WAL 中；按事务合并，否则解密主库
+    // 会漏掉新增/更新的表情记录。每个事务的所有页全部解密成功才应用，
+    // 校验和通过却解密失败时明确报错——绝不返回新旧页面混合的数据库。
+    // （校验和链断裂处之后的帧已在解析阶段按未提交丢弃，见 collect_wal_transactions。）
     let wal_path = {
         let mut s = path.as_os_str().to_os_string();
         s.push("-wal");
         PathBuf::from(s)
     };
     if let Ok(wal) = std::fs::read(&wal_path) {
-        if let Some((committed, final_pages)) = collect_wal_committed_frames(&wal) {
-            let target_pages = final_pages as usize;
-            if pages.len() < target_pages {
-                pages.resize(target_pages, vec![0u8; PAGE_SIZE]);
-            }
-            for (page_no, data_offset) in committed {
-                let page_no = page_no as usize;
-                if page_no == 0 || page_no > target_pages {
-                    continue;
+        if let Some(transactions) = collect_wal_transactions(&wal) {
+            for tx in &transactions {
+                let target = tx.db_size_after as usize;
+                if pages.len() < target {
+                    pages.resize(target, vec![0u8; PAGE_SIZE]);
                 }
-                match decrypt_page_image(
-                    &wal[data_offset..data_offset + PAGE_SIZE],
-                    page_no as u32,
-                    &key,
-                    &mac_key,
-                ) {
-                    Ok(plain) => pages[page_no - 1] = plain,
-                    // 单帧校验失败不致命：保留主库页面，跳过该 WAL 帧。
-                    Err(_) => continue,
+                let mut decoded = Vec::with_capacity(tx.pages.len());
+                for (page_no, data_offset) in &tx.pages {
+                    let page_no = *page_no as usize;
+                    if page_no == 0 || page_no > target {
+                        return Err(DecryptError::Invalid(
+                            "wal transaction references page out of range".to_string(),
+                        ));
+                    }
+                    match decrypt_page_image(
+                        &wal[*data_offset..*data_offset + PAGE_SIZE],
+                        page_no as u32,
+                        &key,
+                        &mac_key,
+                    ) {
+                        Ok(plain) => decoded.push((page_no, plain)),
+                        Err(_) => {
+                            return Err(DecryptError::Invalid(
+                                "wal frame failed page integrity check".to_string(),
+                            ))
+                        }
+                    }
                 }
+                for (page_no, plain) in decoded {
+                    pages[page_no - 1] = plain;
+                }
+                pages.truncate(target);
             }
-            pages.truncate(target_pages);
         }
     }
 
@@ -2148,21 +2222,39 @@ async fn cmd_update(args: &UpdateArgs) -> anyhow::Result<()> {
             .filter(|s| !s.is_empty())
             .unwrap_or_else(|| "latest".to_string());
 
-        let installer_url = format!(
-            "https://raw.githubusercontent.com/{}/main/scripts/install-wxemoticon.cmd",
-            args.repo.trim()
-        );
-        let cmdline = format!(
-            r#"curl -fsSL {installer_url} -o "%TEMP%\wxemoticon-install.cmd" && "%TEMP%\wxemoticon-install.cmd""#
-        );
-
+        // 可用 WXEMOTICON_INSTALLER_URL 覆盖安装脚本地址（镜像/测试用）。
+        let installer_url = std::env::var("WXEMOTICON_INSTALLER_URL")
+            .ok()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| {
+                format!(
+                    "https://raw.githubusercontent.com/{}/main/scripts/install-wxemoticon.cmd",
+                    args.repo.trim()
+                )
+            });
         if !args.json {
             eprintln!("开始更新 wxemoticon（version: {version}）...");
         }
 
+        // 直接用 Rust 调 curl 与 cmd 分步执行，避免 cmd /C 嵌套引号
+        // 的剥离规则把脚本路径里的引号吃掉。
+        let script_path = std::env::temp_dir().join("wxemoticon-install.cmd");
+        let status = Command::new("curl")
+            .arg("-fsSL")
+            .arg(&installer_url)
+            .arg("-o")
+            .arg(&script_path)
+            .status()
+            .context("执行 curl 下载安装脚本失败")?;
+        if !status.success() {
+            return Err(anyhow!("下载安装脚本失败（退出码：{status}）"));
+        }
+
         let mut command = Command::new("cmd");
         command
-            .args(["/S", "/C", &cmdline])
+            .arg("/C")
+            .arg(&script_path)
             .env("WXEMOTICON_REPO", args.repo.trim())
             .env("INSTALL_DIR", install_dir.display().to_string());
         if version != "latest" {
@@ -2201,7 +2293,6 @@ fn shell_single_quote(input: &str) -> String {
 #[cfg(test)]
 mod cli_tests {
     use super::*;
-    #[cfg(unix)]
     use tempfile::tempdir;
 
     #[test]
@@ -2273,75 +2364,211 @@ mod cli_tests {
         );
     }
 
-    fn build_wal_frame(page_no: u32, db_size_after: u32, salt: &[u8; 8], fill: u8) -> Vec<u8> {
-        let mut frame = Vec::new();
-        frame.extend_from_slice(&page_no.to_be_bytes());
-        frame.extend_from_slice(&db_size_after.to_be_bytes());
-        frame.extend_from_slice(salt);
-        frame.extend_from_slice(&[0u8; 8]); // checksums（解析时不校验）
-        frame.extend(vec![fill; 4096]);
-        frame
+    // ======== WAL 回归测试（真实链式校验和 + 真实加密页）========
+
+    /// 与解密侧一致的 mac_key 派生（PBKDF2(key, salt^0x3a, 2)）。
+    fn fixture_mac_key(key: &[u8; 32], salt: &[u8; 16]) -> [u8; 32] {
+        let mac_salt: Vec<u8> = salt.iter().map(|b| b ^ 0x3a).collect();
+        pbkdf2_hmac_array::<Sha512, 32>(key, &mac_salt, 2)
     }
 
-    fn build_wal(frames: &[Vec<u8>]) -> Vec<u8> {
+    /// 构造 SQLCipher 格式的加密页；正文首字节为 seed 标记，用于断言解密结果。
+    fn encrypted_fixture_page(
+        page_no: u32,
+        key: &[u8; 32],
+        mac_key: &[u8; 32],
+        salt: &[u8; 16],
+        seed: u8,
+    ) -> Vec<u8> {
+        use cbc::cipher::BlockEncryptMut;
+        let mut page = vec![0u8; 4096];
+        let offset = if page_no == 1 { 16 } else { 0 };
+        if page_no == 1 {
+            page[..16].copy_from_slice(salt);
+        }
+        for (i, b) in page[offset..4016].iter_mut().enumerate() {
+            *b = seed.wrapping_add(i as u8);
+        }
+        let iv = [seed; 16];
+        page[4016..4032].copy_from_slice(&iv);
+        let encrypted = {
+            let region = &mut page[offset..4016];
+            cbc::Encryptor::<Aes256>::new_from_slices(key, &iv)
+                .unwrap()
+                .encrypt_padded_mut::<NoPadding>(region, 4016 - offset)
+                .unwrap()
+                .to_vec()
+        };
+        page[offset..4016].copy_from_slice(&encrypted);
+        let mut mac = Hmac::<Sha512>::new_from_slice(mac_key).unwrap();
+        mac.update(&page[offset..4032]);
+        mac.update(&page_no.to_le_bytes());
+        page[4032..].copy_from_slice(&mac.finalize().into_bytes());
+        page
+    }
+
+    /// 逐帧构造带真实链式校验和的 WAL（magic 0x377F0682，小端校验和）。
+    /// frames 元素：(页号, 页数据, db_size_after（0=非提交帧）, salt)
+    fn build_checked_wal(frames: &[(u32, Vec<u8>, u32, [u8; 8])]) -> Vec<u8> {
         let mut wal = Vec::new();
-        wal.extend_from_slice(&0x377F_0682u32.to_be_bytes()); // magic
-        wal.extend_from_slice(&3_007_000u32.to_be_bytes()); // format version
-        wal.extend_from_slice(&4096u32.to_be_bytes()); // page size
-        wal.extend_from_slice(&0u32.to_be_bytes()); // checkpoint seq
-        wal.extend_from_slice(&[1u8; 8]); // salt1 + salt2
-        wal.extend_from_slice(&[0u8; 8]); // checksums
-        for f in frames {
-            wal.extend_from_slice(f);
+        wal.extend_from_slice(&0x377F_0682u32.to_be_bytes());
+        wal.extend_from_slice(&3_007_000u32.to_be_bytes());
+        wal.extend_from_slice(&4096u32.to_be_bytes());
+        wal.extend_from_slice(&0u32.to_be_bytes());
+        wal.extend_from_slice(&[1u8; 8]);
+        let (h0, h1) = wal_checksum(&wal[..24], 0, 0, false);
+        wal.extend_from_slice(&h0.to_le_bytes());
+        wal.extend_from_slice(&h1.to_le_bytes());
+        let mut chain = (h0, h1);
+        for (page_no, page, db_size_after, salt) in frames {
+            let mut header = [0u8; 24];
+            header[0..4].copy_from_slice(&page_no.to_be_bytes());
+            header[4..8].copy_from_slice(&db_size_after.to_be_bytes());
+            header[8..16].copy_from_slice(salt);
+            let (a0, a1) = wal_checksum(&header[..8], chain.0, chain.1, false);
+            let (c0, c1) = wal_checksum(&page[..4096], a0, a1, false);
+            header[16..20].copy_from_slice(&c0.to_le_bytes());
+            header[20..24].copy_from_slice(&c1.to_le_bytes());
+            wal.extend_from_slice(&header);
+            wal.extend_from_slice(page);
+            chain = (c0, c1);
         }
         wal
     }
 
     #[test]
-    fn wal_parser_keeps_only_committed_frames_and_final_size() {
-        let salt = [1u8; 8];
-        let frames = vec![
-            build_wal_frame(2, 0, &salt, 0xAA),
-            build_wal_frame(3, 5, &salt, 0xBB), // commit：db 共 5 页
-            build_wal_frame(4, 0, &salt, 0xCC), // 未提交，应忽略
-        ];
-        let wal = build_wal(&frames);
-
-        let (committed, final_pages) = collect_wal_committed_frames(&wal).unwrap();
-
-        assert_eq!(final_pages, 5);
-        assert_eq!(committed.len(), 2);
-        assert!(committed.contains_key(&2));
-        assert!(committed.contains_key(&3));
-        assert!(!committed.contains_key(&4));
-        assert_eq!(wal[committed[&3]..committed[&3] + 4], [0xBB; 4]);
+    fn wal_parser_groups_frames_into_transactions() {
+        let wal = build_checked_wal(&[
+            (2, vec![0xAA; 4096], 0, [1u8; 8]),
+            (3, vec![0xBB; 4096], 5, [1u8; 8]), // 提交：事务含 2、3 两页
+            (4, vec![0xCC; 4096], 0, [1u8; 8]), // 未提交帧不进入任何事务
+        ]);
+        let txs = collect_wal_transactions(&wal).unwrap();
+        assert_eq!(txs.len(), 1);
+        assert_eq!(txs[0].db_size_after, 5);
+        let pages: Vec<u32> = txs[0].pages.iter().map(|(n, _)| *n).collect();
+        assert_eq!(pages, vec![2, 3]);
     }
 
     #[test]
-    fn wal_parser_ignores_stale_frames_with_mismatched_salt() {
-        let salt = [1u8; 8];
-        let stale_salt = [9u8; 8];
-        let frames = vec![
-            build_wal_frame(2, 3, &salt, 0xAA),
-            build_wal_frame(4, 6, &stale_salt, 0xDD),
-        ];
-        let wal = build_wal(&frames);
-
-        let (committed, final_pages) = collect_wal_committed_frames(&wal).unwrap();
-
-        assert_eq!(final_pages, 3);
-        assert!(!committed.contains_key(&4));
+    fn wal_parser_applies_only_checksum_valid_prefix() {
+        let mut wal = build_checked_wal(&[
+            (2, vec![0x55; 4096], 4, [1u8; 8]),
+            (3, vec![0x66; 4096], 5, [1u8; 8]),
+        ]);
+        // 破坏第二个事务首帧的页数据 → 校验和链断裂，第二个事务整体作废。
+        let second_page_off = 32 + (24 + 4096) + 24;
+        wal[second_page_off + 100] ^= 1;
+        let txs = collect_wal_transactions(&wal).unwrap();
+        assert_eq!(txs.len(), 1);
+        assert_eq!(txs[0].db_size_after, 4);
+        let pages: Vec<u32> = txs[0].pages.iter().map(|(n, _)| *n).collect();
+        assert_eq!(pages, vec![2]);
     }
 
     #[test]
-    fn wal_parser_rejects_invalid_headers_and_empty_logs() {
-        assert!(collect_wal_committed_frames(&[]).is_none());
-        assert!(collect_wal_committed_frames(&[0u8; 32]).is_none());
+    fn wal_parser_rejects_bad_header_and_stale_salt() {
+        assert!(collect_wal_transactions(&[]).is_none());
+        assert!(collect_wal_transactions(&[0u8; 32]).is_none());
 
-        // 没有任何 commit 帧时视为无有效内容。
-        let salt = [1u8; 8];
-        let wal = build_wal(&[build_wal_frame(2, 0, &salt, 0xAA)]);
-        assert!(collect_wal_committed_frames(&wal).is_none());
+        // 头部校验和被破坏。
+        let mut wal = build_checked_wal(&[(2, vec![0xAA; 4096], 3, [1u8; 8])]);
+        wal[25] ^= 1;
+        assert!(collect_wal_transactions(&wal).is_none());
+
+        // salt 不匹配的旧帧：校验和链在第一帧即断。
+        let wal = build_checked_wal(&[(2, vec![0xAA; 4096], 3, [9u8; 8])]);
+        assert!(collect_wal_transactions(&wal).is_none());
+
+        // 只有未提交帧。
+        let wal = build_checked_wal(&[(2, vec![0xAA; 4096], 0, [1u8; 8])]);
+        assert!(collect_wal_transactions(&wal).is_none());
+    }
+
+    #[test]
+    fn wal_corrupted_frame_keeps_whole_transaction_out() {
+        // 审查复现用例：同一事务更新两页，损坏第二页后，结果必须是
+        // “两页都保持旧值”，而不是“第一页新、第二页旧”的混合状态。
+        let dir = tempdir().unwrap();
+        let db = dir.path().join("emoticon.db");
+        let key = [0x42u8; 32];
+        let salt = [0x11u8; 16];
+        let mac_key = fixture_mac_key(&key, &salt);
+        let p1 = encrypted_fixture_page(1, &key, &mac_key, &salt, 0x10);
+        let p2_old = encrypted_fixture_page(2, &key, &mac_key, &salt, 0x20);
+        let p3_old = encrypted_fixture_page(3, &key, &mac_key, &salt, 0x30);
+        let p2_new = encrypted_fixture_page(2, &key, &mac_key, &salt, 0x21);
+        let p3_new = encrypted_fixture_page(3, &key, &mac_key, &salt, 0x31);
+        std::fs::write(&db, [p1, p2_old, p3_old].concat()).unwrap();
+
+        let mut wal = build_checked_wal(&[
+            (2, p2_new, 0, [1u8; 8]),
+            (3, p3_new, 3, [1u8; 8]),
+        ]);
+        // 损坏第二帧的页数据（帧校验和随之失效，事务不再被视为已提交）。
+        let second_page_off = 32 + (24 + 4096) + 24;
+        wal[second_page_off + 50] ^= 1;
+        std::fs::write(db.with_file_name("emoticon.db-wal"), &wal).unwrap();
+
+        let out = decrypt_db_file_v4_with_key(&db, &key, false).unwrap();
+        assert_eq!(out.len(), 3 * 4096);
+        // 第 2、3 页都保持旧值（seed 标记 0x20 / 0x30）。
+        assert_eq!(out[4096], 0x20);
+        assert_eq!(out[2 * 4096], 0x30);
+    }
+
+    #[test]
+    fn wal_transactions_apply_in_order_and_later_wins() {
+        let dir = tempdir().unwrap();
+        let db = dir.path().join("emoticon.db");
+        let key = [0x42u8; 32];
+        let salt = [0x11u8; 16];
+        let mac_key = fixture_mac_key(&key, &salt);
+        let p1 = encrypted_fixture_page(1, &key, &mac_key, &salt, 0x10);
+        let p2_old = encrypted_fixture_page(2, &key, &mac_key, &salt, 0x20);
+        let p3_old = encrypted_fixture_page(3, &key, &mac_key, &salt, 0x30);
+        let p2_v1 = encrypted_fixture_page(2, &key, &mac_key, &salt, 0x21);
+        let p2_v2 = encrypted_fixture_page(2, &key, &mac_key, &salt, 0x22);
+        let p3_new = encrypted_fixture_page(3, &key, &mac_key, &salt, 0x31);
+        std::fs::write(&db, [p1, p2_old, p3_old].concat()).unwrap();
+
+        // 事务一：写第 2 页并提交；事务二：再写第 2 页 + 第 3 页并提交。
+        let wal = build_checked_wal(&[
+            (2, p2_v1, 3, [1u8; 8]),
+            (2, p2_v2, 0, [1u8; 8]),
+            (3, p3_new, 3, [1u8; 8]),
+        ]);
+        std::fs::write(db.with_file_name("emoticon.db-wal"), &wal).unwrap();
+
+        let out = decrypt_db_file_v4_with_key(&db, &key, false).unwrap();
+        assert_eq!(out.len(), 3 * 4096);
+        // 后提交的事务覆盖先提交的事务；未涉及页保持旧值。
+        assert_eq!(out[4096], 0x22);
+        assert_eq!(out[2 * 4096], 0x31);
+    }
+
+    #[test]
+    fn wal_valid_checksum_but_bad_hmac_fails_explicitly() {
+        // 校验和自洽、但页内容用另一把密钥构造：必须明确报错，
+        // 而不是静默跳过该页造成同一事务新旧混合。
+        let dir = tempdir().unwrap();
+        let db = dir.path().join("emoticon.db");
+        let key = [0x42u8; 32];
+        let wrong_key = [0x43u8; 32];
+        let salt = [0x11u8; 16];
+        let mac_key = fixture_mac_key(&key, &salt);
+        let wrong_mac_key = fixture_mac_key(&wrong_key, &salt);
+        let p1 = encrypted_fixture_page(1, &key, &mac_key, &salt, 0x10);
+        let p2_old = encrypted_fixture_page(2, &key, &mac_key, &salt, 0x20);
+        let p3_old = encrypted_fixture_page(3, &key, &mac_key, &salt, 0x30);
+        let p2_foreign = encrypted_fixture_page(2, &wrong_key, &wrong_mac_key, &salt, 0x21);
+        std::fs::write(&db, [p1, p2_old, p3_old].concat()).unwrap();
+
+        let wal = build_checked_wal(&[(2, p2_foreign, 3, [1u8; 8])]);
+        std::fs::write(db.with_file_name("emoticon.db-wal"), &wal).unwrap();
+
+        let result = decrypt_db_file_v4_with_key(&db, &key, false);
+        assert!(result.is_err());
     }
 
     #[test]
